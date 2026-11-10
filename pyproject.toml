@@ -1,0 +1,19 @@
+[project]
+name = "debrief"
+version = "0.1.0"
+description = "Review your coding-agent sessions: what went wrong, and what to change."
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "python-dotenv>=1.2.3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
