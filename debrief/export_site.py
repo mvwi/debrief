@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 
 from debrief import skills
-from debrief.db import connect
+from debrief.db import connect, session_projects
 from debrief.paths import SITE_OUT, SITE_SRC
 from debrief.recommend import LEVERS
 from debrief.relay import is_relayed
@@ -241,7 +241,7 @@ def findings_and_recs(conn, labels, run_id: str) -> tuple[dict, list, dict]:
         for ref in evidence:
             refs.setdefault(ref_id(ref), resolve(conn, labels, ref))
         findings[r["finding_id"]] = {"id": r["finding_id"], "kind": r["kind"], "title": r["title"],
-                                     "detail": r["detail"], "fix": r["suggested_fix"],
+                                     "detail": r["detail"], "fix": r["suggested_fix"], "project": r["project"],
                                      "evidence": [ref_id(e) for e in evidence]}
     # verify_evidence.py's verdicts: rec_id -> ref ids that support the idea. No rows: not checked.
     supported: dict[int, set] = {}
@@ -256,7 +256,9 @@ def findings_and_recs(conn, labels, run_id: str) -> tuple[dict, list, dict]:
         checked = r["rec_id"] in supported
         evidence = [e for e in cited if e in supported[r["rec_id"]]] if checked else cited
         # Reach (sessions, people) comes from `evidence` in main(), so it counts supported refs only.
+        # project: the folder the idea is about; None when it spans projects, and in runs from before projects.
         recs.append({"id": r["rec_id"], "priority": r["priority"], "lever": r["lever"], "title": r["title"],
+                     "project": r["project"],
                      "problem": r["problem"], "change": r["change"], "target": r["target"], "effort": r["effort"],
                      "impact": r["impact"], "findings": ids, "evidence": evidence, "evidence_all": len(cited),
                      "checked": checked, "weak": checked and not evidence})
@@ -294,6 +296,7 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
         turns_by_session[r[0]].append(r)
     # Entire's started_at is the first checkpoint, often long after the first message.
     first_ts = dict(conn.execute("SELECT session_id, MIN(ts) FROM messages WHERE ts IS NOT NULL GROUP BY session_id"))
+    project = session_projects(conn)
 
     sessions, flagged = [], []
     for s in conn.execute("SELECT * FROM sessions WHERE COALESCE(last_activity_at, started_at, '') >= ? "
@@ -318,8 +321,8 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
         sessions.append({
             "id": sid, "name": s["display_name"], "agent": s["agent"], "model": s["model"],
             "author": s["author"] or None, "started": started, "last": s["last_activity_at"] or started,
-            # The folder the session ran in; the site shows its last part and filters on the whole path.
-            "project": s["cwd"] or None,  # db.connect adds the column to old databases
+            # The session's project, a folder; the site shows its last part and scopes on the whole path.
+            "project": project.get(sid) or None,
             "human_turns": len(turns_by_session.get(sid, [])), "turn_kinds": dict(kinds),
             "corrections": count["correction"], "reversals": count["reversal"], "defects": count["defect"],
             "could_find": count["could_find"], "not_filed": len(not_filed), "friction": friction,

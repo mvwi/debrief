@@ -101,3 +101,22 @@ def test_with_github(tmp_path):
     (rec,) = index["recommendations"]
     assert rec["lever"] == "made_up_lever" and rec["sessions"] == ["s1"] and rec["people"] == 1
     assert {index["refs"][e]["type"] for e in rec["evidence"]} == {"msg", "check"}
+    # A run from before findings had a project: exported as spanning projects.
+    assert rec["project"] is None and index["findings"]["1"]["project"] is None
+
+
+def with_projects(conn) -> None:
+    with_github(conn)
+    # s2 ran in a worktree folder and opened a PR in s1's repo, so it joins s1's project.
+    conn.execute("UPDATE sessions SET cwd = '/home/me/worktrees/robin' WHERE session_id = 's2'")
+    conn.execute("INSERT INTO session_prs VALUES ('s2', 'acme/widgets', 7, 'branch')")
+    conn.execute("UPDATE findings SET project = '/home/me/alpha'")
+    conn.execute("UPDATE recommendations SET project = '/home/me/alpha', target = 'alpha: CLAUDE.md'")
+
+
+def test_projects(tmp_path):
+    index = export(tmp_path, with_projects)
+    assert {s["id"]: s["project"] for s in index["sessions"]} == {"s1": "/home/me/alpha", "s2": "/home/me/alpha"}
+    (rec,) = index["recommendations"]
+    assert rec["project"] == "/home/me/alpha" and rec["target"] == "alpha: CLAUDE.md"
+    assert index["findings"]["1"]["project"] == "/home/me/alpha"

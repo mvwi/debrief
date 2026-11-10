@@ -30,6 +30,11 @@ Useful flags for `sync`:
 
 A re-run only reads logs that changed and only labels turns that are new.
 
+Findings and ideas are built per project, the folder a session ran in. A project with 100 or
+more of your messages gets findings of its own; smaller ones share one pass. Ideas name the
+project they land in (`canopy: CLAUDE.md`), and the picker in the report's side bar scopes
+every page to one project. Findings about how you prompt come from all sessions together.
+
 `debrief <stage> --help` runs one stage on its own: `ingest`, `label`, `synthesize`,
 `recommend`, `verify`, `export`, `prune`.
 
@@ -110,6 +115,10 @@ How they compare, measured on the prototype's data with no human-labeled set beh
   take ten minutes). Review comments count for every session linked to the PR.
 - Sessions fetched from Entire still need `debrief github --repo owner/name`; `sync` does not
   fetch their GitHub data.
+- A session's project is the folder it ran in, or the project of the repo it opened a PR in.
+  A session run in a worktree that ingest did not trace to its repo, and that opened no PR,
+  shows up as a project of its own, named after the worktree folder.
+- "How it works" describes the whole run; the project picker does not scope its numbers.
 - Labels vary between runs: on a set of hard cases Haiku changed its answer on about 15% of
   rows between two identical runs.
 - Pi logs are parsed but only tested against a made-up log.
