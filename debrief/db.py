@@ -85,6 +85,29 @@ CREATE TABLE IF NOT EXISTS session_labels (
     PRIMARY KEY (session_id, field)
 );
 
+-- One row per log file debrief.sources has looked at, loaded or not, so a re-run can skip
+-- files that have not changed.
+CREATE TABLE IF NOT EXISTS source_logs (
+    path       TEXT PRIMARY KEY,
+    session_id TEXT,
+    agent      TEXT,
+    size       INTEGER,
+    mtime      INTEGER,              -- st_mtime_ns
+    status     TEXT,                 -- loaded, or why the file was skipped
+    cwd        TEXT,                 -- as the log records it, for the --project filter
+    dropped    INTEGER               -- entries left out because another session owns them
+);
+
+-- Which sessions' logs hold each entry. A resumed or forked session's log starts with a
+-- copy of the earlier one; the copies load only into the session that owns them.
+CREATE TABLE IF NOT EXISTS source_entries (
+    entry_key  TEXT NOT NULL,        -- the entry's uuid, or the format's nearest equivalent
+    session_id TEXT NOT NULL,
+    native     INTEGER NOT NULL,     -- 1 when the entry names this session as its own
+    PRIMARY KEY (entry_key, session_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS source_entries_session ON source_entries (session_id);
+
 CREATE TABLE IF NOT EXISTS gh_prs (
     pr_number  INTEGER PRIMARY KEY,
     title      TEXT,

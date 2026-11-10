@@ -1,4 +1,7 @@
-"""Load data/raw/<session_id>/ into the sessions, checkpoints, messages and tool_calls tables.
+"""Load Entire's raw/<session_id>/ folders into the sessions, checkpoints, messages and tool_calls tables.
+
+Logs read straight from disk (Claude Code, Codex, Pi) go through debrief.sources, which
+uses the parsers and write_log here.
 
 Messages and tool calls come from the agent's native log (raw.jsonl), which keeps tool
 output; checkpoints come from transcript.json and session metadata from listing.json.
@@ -52,6 +55,7 @@ HOUSEKEEPING_COMMANDS = {
     "exit", "help", "mcp", "permissions", "memory", "doctor", "fast", "effort", "context", "copy", "reload-skills",
 }
 DUPLICATE_WINDOW = 60  # seconds within which an identical repeated user message counts once
+SESSION_ID = re.compile(r"[0-9a-zA-Z_-]{1,64}")
 ERROR_TEXT = re.compile(r"error|fatal|panic|traceback|no such file|permission denied|\bFAIL\b", re.IGNORECASE)
 
 
@@ -151,8 +155,17 @@ def looks_injected(text: str) -> bool:
     return text.lstrip().startswith(INJECTED_PREFIXES)
 
 
-def read_jsonl(path: Path) -> list[dict]:
-    """Read path, or path + '.gz' when scrape.py saved it compressed."""
+def safe_session_id(session_id: object) -> bool:
+    """A session ID names a folder under RAW_DIR and keys every table, so it may hold only
+    letters, digits, "_" and "-": nothing that could climb out of RAW_DIR."""
+    if not isinstance(session_id, str) or not SESSION_ID.fullmatch(session_id):
+        return False
+    return (RAW_DIR / session_id).resolve().parent == RAW_DIR.resolve()
+
+
+def read_jsonl(path: Path, tolerant: bool = False) -> list[dict]:
+    """Read path, or path + '.gz' when scrape.py saved it compressed. tolerant skips lines
+    that are not JSON: an agent still writing its log can leave a cut-off last line."""
     gz = path.with_name(path.name + ".gz")
     text = gzip.decompress(gz.read_bytes()).decode() if gz.exists() else path.read_text()
     rows = []
@@ -160,7 +173,11 @@ def read_jsonl(path: Path) -> list[dict]:
     # inside JSON strings (pasted text) and would cut a record in two.
     for line in text.split("\n"):
         if line.strip():
-            rows.append(json.loads(line))
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                if not tolerant:
+                    raise
     return rows
 
 
@@ -198,7 +215,7 @@ def parse_claude(entries: list[dict]) -> Log:
             if msg.get("model") == "<synthetic>":  # harness error text such as "API Error: ..."
                 continue
             text = block_text(msg["content"])
-            if msg.get("id") == last_api_id and log.messages[-1]["role"] == "assistant":
+            if msg.get("id") == last_api_id and log.messages and log.messages[-1]["role"] == "assistant":
                 idx = len(log.messages) - 1
                 log.messages[idx]["text"] = "\n".join(t for t in (log.messages[idx]["text"], text) if t)
             else:
@@ -425,22 +442,11 @@ def session_row(session_id: str, listing: dict, meta: dict, cwd: str) -> tuple:
     )
 
 
-def load_session(conn, folder: Path) -> str:
-    session_id = folder.name
-    listing_path = folder / "listing.json"
-    listing = json.loads(listing_path.read_text()) if listing_path.exists() else {}
-    transcript = json.loads((folder / "transcript.json").read_text())
-    agent = listing.get("agent") or transcript["session"].get("agent")
-    parser = PARSERS.get(agent)
-    if parser is None:
-        return f"skip {session_id}: no parser for agent {agent!r}"
-
-    raw = folder / "raw.jsonl"
-    if raw.exists() or raw.with_name(raw.name + ".gz").exists():
-        log = parser(read_jsonl(raw))
-    else:  # scrape.py saves no raw log when it is over the API's size limit
-        log = parse_transcript(transcript)
-    checkpoints = sorted(transcript.get("checkpoints", []), key=lambda c: parse_ts(c["timestamp"]))
+def write_log(conn, row: tuple, log: Log, checkpoints: list[dict] = (), root: str | None = None) -> None:
+    """Replace one session's rows. row is the sessions row, session ID first; root is the
+    directory tool-call paths are made relative to (default: the log's cwd)."""
+    session_id = row[0]
+    root = log.cwd if root is None else root
     cp_times = [(parse_ts(c["timestamp"]), c["checkpointId"]) for c in checkpoints]
 
     def checkpoint_for(ts: str | None) -> str | None:
@@ -454,7 +460,7 @@ def load_session(conn, folder: Path) -> str:
             "INSERT INTO sessions (session_id, agent, model, display_name, author, started_at, last_activity_at,"
             " checkpoint_count, input_tokens, output_tokens, agent_lines, human_lines, prompt, cwd)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            session_row(session_id, listing, transcript.get("session", {}), log.cwd),
+            row,
         )
         conn.executemany(
             "INSERT OR REPLACE INTO checkpoints (checkpoint_id, session_id, commit_sha, message, additions,"
@@ -471,7 +477,7 @@ def load_session(conn, folder: Path) -> str:
         rows = []
         for c in log.calls:
             n = call_idx[c["msg_idx"]] = call_idx.get(c["msg_idx"], -1) + 1
-            files = list(dict.fromkeys(relative(f, log.cwd) for f in c["files"]))
+            files = list(dict.fromkeys(relative(f, root) for f in c["files"]))
             exit_code, is_error = exit_status(c)
             rows.append((session_id, c["msg_idx"], n, c["name"], c["input"], c["output"],
                          is_error, exit_code, json.dumps(files), c["writes"]))
@@ -480,15 +486,38 @@ def load_session(conn, folder: Path) -> str:
             " files, writes) VALUES (?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
+
+
+def load_session(conn, folder: Path) -> str:
+    session_id = folder.name
+    if not safe_session_id(session_id):
+        return f"skip {session_id!r}: not a valid session ID"
+    listing_path = folder / "listing.json"
+    listing = json.loads(listing_path.read_text()) if listing_path.exists() else {}
+    transcript = json.loads((folder / "transcript.json").read_text())
+    agent = listing.get("agent") or transcript["session"].get("agent")
+    parser = PARSERS.get(agent)
+    if parser is None:
+        return f"skip {session_id}: no parser for agent {agent!r}"
+
+    raw = folder / "raw.jsonl"
+    if raw.exists() or raw.with_name(raw.name + ".gz").exists():
+        log = parser(read_jsonl(raw))
+    else:  # scrape.py saves no raw log when it is over the API's size limit
+        log = parse_transcript(transcript)
+    checkpoints = sorted(transcript.get("checkpoints", []), key=lambda c: parse_ts(c["timestamp"]))
+    write_log(conn, session_row(session_id, listing, transcript.get("session", {}), log.cwd), log, checkpoints)
     return f"loaded {session_id}  {agent:<12} {len(log.messages):>4} messages  {len(log.calls):>4} tool calls"
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--ids", nargs="*", help="Only these session IDs (default: every folder in data/raw)")
-    args = parser.parse_args()
+    parser.add_argument("--ids", nargs="*", help="Only these session IDs (default: every folder in raw/)")
+    args = parser.parse_args(argv)
 
-    folders = [RAW_DIR / i for i in args.ids] if args.ids else sorted(p for p in RAW_DIR.iterdir() if p.is_dir())
+    # Only folders scrape.py filled: a home with local sessions alone has no raw/ at all.
+    folders = [RAW_DIR / i for i in args.ids] if args.ids else sorted(
+        p for p in RAW_DIR.glob("*") if (p / "transcript.json").exists())
     conn = db.connect()
     failed = []
     for folder in folders:

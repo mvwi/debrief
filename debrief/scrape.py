@@ -21,6 +21,7 @@ import time
 from collections import Counter
 from datetime import datetime
 
+from debrief.normalize import safe_session_id
 from debrief.paths import RAW_DIR
 
 SUPPORTED_AGENTS = {"Claude Code", "Codex", "Pi"}  # the formats normalize.py parses
@@ -127,6 +128,8 @@ def needs_fetch(session_id: str, listing: dict | None) -> bool:
 
 
 def fetch_session(repo_id: str, session_id: str, listing: dict | None) -> None:
+    if not safe_session_id(session_id):  # main() filters these out; this guards other callers
+        raise ApiError(f"unsafe session ID {session_id!r}")
     out = RAW_DIR / session_id
     out.mkdir(parents=True, exist_ok=True)
     base = f"/repos/{repo_id}/sessions/{session_id}"
@@ -155,7 +158,7 @@ def fetch_session(repo_id: str, session_id: str, listing: dict | None) -> None:
           f"{len(transcript['checkpoints'])} checkpoints  {transcript['session']['displayName']}")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     sys.stdout.reconfigure(line_buffering=True)  # progress shows up in log files as it happens
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", default="gh/entireio/cli", help="Entire repo path, e.g. gh/owner/name")
@@ -165,7 +168,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=100, help="How many sessions to choose from the window")
     parser.add_argument("--max-other", type=int, default=30, help="Cap on Codex/Pi sessions in the choice")
     parser.add_argument("--dry-run", action="store_true", help="Show the choice without fetching sessions")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     repo_id = resolve_repo(args.repo)
     if args.ids:
@@ -175,6 +178,12 @@ def main() -> None:
         sessions = list_sessions(repo_id, args.since, args.until)
         chosen = select(sessions, args.limit, args.max_other)
         listings = {s["sessionId"]: s for s in chosen}
+    # The ID comes from the API or the command line and names a folder under RAW_DIR.
+    for s in chosen:
+        if not safe_session_id(s.get("sessionId")):
+            print(f"warning: skipping session with unsafe ID {s.get('sessionId')!r}")
+    chosen = [s for s in chosen if safe_session_id(s.get("sessionId"))]
+    if not args.ids:
         describe(chosen, sessions)
     if args.dry_run:
         for s in chosen:

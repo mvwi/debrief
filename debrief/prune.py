@@ -43,14 +43,14 @@ def counts(conn) -> dict[str, int]:
     return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in SESSION_TABLES + GH_TABLES}
 
 
-def dir_bytes(path: Path) -> int:
+def dir_bytes(path: Path) -> int:  # 0 when path is missing
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
 def stale_folders(before: str, dropped: set[str], known: set[str]) -> list[Path]:
     """Raw folders to remove: dropped sessions, plus session-less folders that are old or empty."""
     out = []
-    for folder in sorted(p for p in RAW_DIR.iterdir() if p.is_dir()):
+    for folder in sorted(p for p in RAW_DIR.glob("*") if p.is_dir()):  # no raw/ when every session is local
         listing = folder / "listing.json"
         orphan = folder.name not in known and (
             not any(folder.iterdir())
@@ -60,11 +60,11 @@ def stale_folders(before: str, dropped: set[str], known: set[str]) -> list[Path]
     return out
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--before", required=True, metavar="YYYY-MM-DD", help="Drop sessions last active before this")
     parser.add_argument("--dry-run", action="store_true", help="Report what would go; change nothing")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     assert len(args.before) == 10 and args.before[4] == args.before[7] == "-", "--before must be YYYY-MM-DD"
 
     conn = db.connect()
@@ -81,6 +81,9 @@ def main() -> None:
     marks = ",".join("?" * len(dropped))
     for t in SESSION_TABLES:
         conn.execute(f"DELETE FROM {t} WHERE session_id IN ({marks})", list(dropped))
+    # A dropped session must stop owning entries, or a resumed copy of it would keep them left out.
+    # Its source_logs row stays, so sources.py does not load the unchanged log again.
+    conn.execute(f"DELETE FROM source_entries WHERE session_id IN ({marks})", list(dropped))
     for sql in GH_DELETES:
         conn.execute(sql)
     after_counts = counts(conn)
