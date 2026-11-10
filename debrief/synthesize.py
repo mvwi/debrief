@@ -1,15 +1,18 @@
 """Turn labels into findings: SQL rollups per finding kind, then one Claude call per kind.
 
-Rollups become evidence bundles (data/bundles/<run_id>/<kind>.json); Claude reads each
+Rollups become evidence bundles (bundles/<run_id>/<kind>.json); Claude reads each
 bundle and returns findings, which land in the findings table under a new run_id.
 Each bundle holds at most --max-evidence items; its counts cover all evidence.
-Evidence starts at --since: messages by ts, CI failures by completed_at, review comments
-by created_at, sessions by last activity.
+--since sets where evidence starts: messages by ts, CI failures by completed_at, review
+comments by created_at, sessions by last activity. The default is all of it.
+
+A kind with no evidence is skipped with a note and never sent to the model: ci and review
+need GitHub data, so a database of local sessions skips them.
 
 Claude runs through headless Claude Code (`claude -p`, billed to the Claude subscription) by
 default, or through OpenRouter with --llm openrouter.
 
-A bundle's hash (model + prompt + bundle) is saved in its file and in data/bundles/index.json.
+A bundle's hash (model + prompt + bundle) is saved in its file and in bundles/index.json.
 If the latest run for a kind came from the same hash, its findings are copied into the new
 run instead of calling the model (--force calls it anyway).
 
@@ -130,10 +133,10 @@ def turn_totals(conn: sqlite3.Connection, matched: list[dict], shown: int, since
     """Counts over all matching turns, against every human and labeled turn since `since`."""
     human, human_sessions = conn.execute(
         "SELECT COUNT(*), COUNT(DISTINCT session_id) FROM messages WHERE role = 'user' AND user_kind = 'human' "
-        "AND ts >= :since", {"since": since}).fetchone()
+        "AND COALESCE(ts, '') >= :since", {"since": since}).fetchone()
     labeled, labeled_sessions = conn.execute(
         "SELECT COUNT(*), COUNT(DISTINCT session_id) FROM messages m WHERE role = 'user' AND user_kind = 'human' "
-        "AND ts >= :since "
+        "AND COALESCE(ts, '') >= :since "
         "AND EXISTS (SELECT 1 FROM turn_labels l WHERE l.session_id = m.session_id AND l.msg_idx = m.idx)",
         {"since": since}).fetchone()
     return {"items": len(matched), "shown": shown, "sessions": len({t["session_id"] for t in matched}),
@@ -182,8 +185,13 @@ def clean(item: dict) -> dict:
     return {k: v for k, v in item.items() if not k.startswith("_")}
 
 
-# A PR is settled once merged or closed (db.settled_prs). Outcome, CI and review
-# rollups keep only work whose PR is settled; these expressions flag it.
+# A PR is settled once merged or closed (db.settled_prs). CI and review rollups keep only
+# work whose PR is settled. The outcome rollup drops a session only while its PR is open:
+# a session with no linked PR (local logs, or work never pushed) stays in.
+SESSION_PR = """EXISTS (
+    SELECT 1 FROM checkpoints cp
+    JOIN gh_commit_prs g ON g.commit_sha = cp.commit_sha
+    WHERE cp.session_id = s.session_id)"""
 SETTLED_SESSION = """EXISTS (
     SELECT 1 FROM checkpoints cp
     JOIN gh_commit_prs g ON g.commit_sha = cp.commit_sha
@@ -193,8 +201,17 @@ SETTLED_CHECK = """EXISTS (
     SELECT 1 FROM gh_commit_prs g JOIN settled_prs sp ON sp.pr_number = g.pr_number
     WHERE g.commit_sha = k.commit_sha)"""
 
-# Real CI failures: skip the Entire approval gate and the 'test' job that only echoes
-# other jobs' results. flaky = 1 when the same check later passed on the same commit.
+# Checks that say nothing about the code. The Entire GitHub App's check is an approval gate
+# (only that app has the slug 'entire'). A gate job fails because another job did: its log
+# compares job results, as in `[ "failure" = "success" ]`. Any check name with such a
+# failure is left out, passes included, so the totals don't count it either.
+# shortcut: knows only this shell form of gate job; add forms as they turn up.
+REAL_CHECK = """(COALESCE(k.app, '') != 'entire' AND COALESCE(k.name, '') NOT IN (
+    SELECT COALESCE(name, '') FROM gh_checks WHERE conclusion = 'failure' AND (
+        failure_log LIKE '%"failure" = "success"%' OR failure_log LIKE '%"cancelled" = "success"%'
+        OR failure_log LIKE '%"skipped" = "success"%')))"""
+
+# Real CI failures. flaky = 1 when the same check later passed on the same commit.
 # Needs :since, the window start.
 CI_FAILS = f"""
 ci_fails AS (
@@ -204,8 +221,8 @@ ci_fails AS (
           AND s.completed_at > k.completed_at) AS flaky,
         {SETTLED_CHECK} AS settled
     FROM gh_checks k
-    WHERE k.conclusion = 'failure' AND COALESCE(k.app, '') != 'entire' AND k.name != 'test'
-      AND k.completed_at >= :since
+    WHERE k.conclusion = 'failure' AND {REAL_CHECK}
+      AND COALESCE(k.completed_at, '') >= :since
 )"""
 
 
@@ -229,12 +246,12 @@ def hotspot(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
         JOIN windows w USING (session_id, msg_idx)
         JOIN messages m ON m.session_id = tu.session_id AND m.idx = tu.msg_idx
         WHERE (tu.turn_kind = 'correction' OR tu.reversal = 'true' OR tu.caught_defect = 'true')
-          AND m.ts >= :since
+          AND COALESCE(m.ts, '') >= :since
         ORDER BY tu.session_id, tu.msg_idx""", {"c": c, "since": since})
     errors = dict(conn.execute("""
         SELECT f.value, COUNT(*) FROM tool_calls tc JOIN json_each(tc.files) f
         JOIN messages m ON m.session_id = tc.session_id AND m.idx = tc.msg_idx
-        WHERE tc.is_error = 1 AND m.ts >= :since GROUP BY f.value""", {"since": since}))
+        WHERE tc.is_error = 1 AND COALESCE(m.ts, '') >= :since GROUP BY f.value""", {"since": since}))
     files: dict[str, dict] = {}
     turns = []
     for t in flagged:
@@ -282,9 +299,12 @@ def hotspot(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
                             for t in f.pop("_turns") if ref_key(t) in shown_keys]
     for t in shown:
         t["agent_before"] = agent_text(conn, t["session_id"], t["_prev"], t["msg_idx"] - 1, 250)
-    return {"totals": {**turn_totals(conn, turns, len(shown), since), "flagged_turns_without_files": len(flagged) - len(turns),
-                       "files": len(files)},
-            "files": top, "flagged_turns": [clean(t) for t in shown], "ci_failures_by_check": checks}
+    totals = {**turn_totals(conn, turns, len(shown), since),
+              "flagged_turns_without_files": len(flagged) - len(turns), "files": len(files)}
+    bundle = {"totals": totals, "files": top, "flagged_turns": [clean(t) for t in shown]}
+    if checks:  # absent without GitHub data
+        bundle["ci_failures_by_check"] = checks
+    return bundle
 
 
 def knowledge_gap(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
@@ -300,7 +320,7 @@ def knowledge_gap(conn: sqlite3.Connection, c: float, n: int, since: str) -> dic
         JOIN windows w USING (session_id, msg_idx)
         JOIN messages m ON m.session_id = tu.session_id AND m.idx = tu.msg_idx
         WHERE (tu.could_have_found = 'true' OR tu.resource_pointed_to NOT IN ('none', ''))
-          AND m.ts >= :since
+          AND COALESCE(m.ts, '') >= :since
         ORDER BY tu.session_id, tu.msg_idx""", {"c": c, "since": since})
     groups: dict[str, dict] = {}
     for t in turns:
@@ -344,7 +364,7 @@ def found_not_filed(conn: sqlite3.Connection, c: float, n: int, since: str) -> d
         FROM turn_labels l
         JOIN windows w USING (session_id, msg_idx)
         JOIN messages m ON m.session_id = l.session_id AND m.idx = l.msg_idx
-        WHERE l.field = 'found_not_filed' AND l.value = 'true' AND l.confidence >= :c AND m.ts >= :since
+        WHERE l.field = 'found_not_filed' AND l.value = 'true' AND l.confidence >= :c AND COALESCE(m.ts, '') >= :since
         ORDER BY l.session_id, l.msg_idx""", {"c": c, "since": since})
     # Repeats of one deferred problem are reworded, so the model merges them, not us.
     for h in hits:
@@ -373,7 +393,7 @@ def correction_pattern(conn: sqlite3.Connection, c: float, n: int, since: str) -
         FROM turns tu
         JOIN windows w USING (session_id, msg_idx)
         JOIN messages m ON m.session_id = tu.session_id AND m.idx = tu.msg_idx
-        WHERE tu.turn_kind = 'correction' AND m.ts >= :since
+        WHERE tu.turn_kind = 'correction' AND COALESCE(m.ts, '') >= :since
         ORDER BY tu.session_id, tu.msg_idx""", {"c": c, "since": since})
     groups: dict[str, dict] = {}
     for t in turns:
@@ -419,15 +439,15 @@ def prompt_practice(conn: sqlite3.Connection, c: float, n: int, since: str) -> d
             MAX(CASE WHEN sl.field = 'outcome' THEN sl.value END) AS outcome,
             COALESCE(p.corrections, 0) AS corrections, COALESCE(p.reversals, 0) AS reversals,
             COALESCE(p.caught_defects, 0) AS caught_defects,
-            {SETTLED_SESSION} AS settled
+            {SESSION_PR} AS has_pr, {SETTLED_SESSION} AS settled
         FROM sessions s
         JOIN session_labels sl ON sl.session_id = s.session_id AND sl.confidence >= :c
         JOIN first_human fh ON fh.session_id = s.session_id
         LEFT JOIN per_session p ON p.session_id = s.session_id
-        WHERE s.last_activity_at >= :since
+        WHERE COALESCE(s.last_activity_at, '') >= :since
         GROUP BY s.session_id ORDER BY s.session_id""", {"c": c, "since": since})
-    unsettled = sum(not s["settled"] for s in sessions)
-    sessions = [s for s in sessions if s["settled"]]
+    unsettled = sum(s["has_pr"] and not s["settled"] for s in sessions)
+    sessions = [s for s in sessions if s["settled"] or not s["has_pr"]]
     by_label: dict[str, dict] = {}
     for field in ("prompt_style", "prompt_specificity", "task_type", "planned_first", "tests_added"):
         for s in sessions:
@@ -452,9 +472,10 @@ def prompt_practice(conn: sqlite3.Connection, c: float, n: int, since: str) -> d
         {"session_id": s["session_id"], "msg_idx": s["msg_idx"], "agent": s["agent"],
          **{k: s[k] for k in ("task_type", "prompt_style", "prompt_specificity", "planned_first", "tests_added",
                               "outcome", "human_turns", "corrections", "reversals", "caught_defects")},
-         "opening_prompt": excerpt(s["prompt"], 300)}
+         "pr": "merged_or_closed" if s["has_pr"] else "none", "opening_prompt": excerpt(s["prompt"], 300)}
         for s in shown]
-    totals = {"items": len(sessions), "shown": len(shown), "sessions": len(sessions), "excluded_unsettled": unsettled}
+    totals = {"items": len(sessions), "shown": len(shown), "sessions": len(sessions), "excluded_unsettled": unsettled,
+              "sessions_without_pr": sum(not s["has_pr"] for s in sessions)}
     return {"totals": totals, "by_label": by_label, "per_session": per_session}
 
 
@@ -472,7 +493,7 @@ def ci(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
     unsettled = sum(not f["settled"] for f in fails)
     fails = [f for f in fails if f["settled"]]
     total = conn.execute(f"SELECT COUNT(*) FROM gh_checks k WHERE conclusion IS NOT NULL "
-                         f"AND COALESCE(app, '') != 'entire' AND name != 'test' AND completed_at >= :since "
+                         f"AND {REAL_CHECK} AND COALESCE(completed_at, '') >= :since "
                          f"AND {SETTLED_CHECK}", {"since": since}).fetchone()[0]
     groups: dict[str, dict] = {}
     for f in fails:
@@ -505,7 +526,7 @@ def review(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
             {event_label_sql('review_comment', 'comment_type').format(id='rc.comment_id')} AS comment_type,
             rc.pr_number IN (SELECT pr_number FROM settled_prs) AS settled
         FROM gh_review_comments rc
-        WHERE rc.in_reply_to IS NULL AND rc.created_at >= :since
+        WHERE rc.in_reply_to IS NULL AND COALESCE(rc.created_at, '') >= :since
         ORDER BY rc.comment_id""", {"c": c, "since": since})
     unsettled = sum(not r["settled"] for r in comments)
     comments = [r for r in comments if r["settled"]]
@@ -574,14 +595,17 @@ def bundle_refs(obj) -> set[tuple]:
 
 # --- LLM pass ----------------------------------------------------------------------
 
-SYSTEM = """You analyze how the engineering team of entireio/cli (a Go CLI, open source) works with AI coding agents.
-You get an evidence bundle: SQL rollups over labeled agent session transcripts, CI checks and PR review comments.
+SYSTEM = """You analyze how a developer or a team works with AI coding agents. It may be one person; the
+bundle's refs and counts show how many sessions there are.
+You get an evidence bundle: SQL rollups over labeled agent session transcripts and, when the data has them,
+CI checks and PR review comments. Take the repo, language and tools from the evidence; assume none.
 Labels come from a classifier and can be wrong; quotes are excerpts.
 The bundle shows a capped sample of items. "totals" and the per-group counts cover all evidence, not just the sample:
 use them when you state counts.
 
-Write findings for that team. Rules:
-- Each finding must be specific and actionable: a concrete line to add to CLAUDE.md/AGENTS.md, a test to add,
+Write findings for the people who ran these sessions. Rules:
+- Each finding must be specific and actionable: a concrete line to add to the agent's instruction file
+  (CLAUDE.md, AGENTS.md or whichever the sessions use), a test to add,
   a script or doc to write, an issue to file, a check to change. Name files, commands and checks when the evidence does.
 - Cite evidence only by copying refs that appear in the bundle: {"session_id": ..., "msg_idx": ...} or
   {"event_type": ..., "event_id": ...}. Never invent or alter a ref.
@@ -595,7 +619,7 @@ Reply with JSON only:
 
 KIND_HINTS = {
     "hotspot": "Files the agent had just written when a human corrected it, reversed a design or caught a defect; "
-               "plus CI failures by check. Look for files or areas that need better docs, tests or guardrails.",
+               "plus CI failures by check when the data has any. Look for files or areas that need better docs, tests or guardrails.",
     "knowledge_gap": "Turns where the human pointed the agent at something (spec, script, doc, prior PR, code) "
                      "or the agent could have found the answer itself. Counts split each resource type into "
                      "opening (the session's first human message) and mid_session (later turns); examples carry "
@@ -606,16 +630,20 @@ KIND_HINTS = {
     "found_not_filed": "Places where the agent noticed a bug or problem outside its task and deferred it without filing "
                        "it during the session. Hits are grouped by session. The agent often repeats the same deferred problem on "
                        "later turns: merge repeats into one finding that cites all their refs, and count each "
-                       "problem once. About 1 in 5 hits is a false positive (e.g. a test-result summary): skip any "
+                       "problem once. Some hits are false positives (e.g. a test-result summary): skip any "
                        "item whose agent_text does not explicitly defer or leave open a specific problem. Each real "
                        "one is a candidate issue: write the issue title and a one-line body in suggested_fix.",
     "correction_pattern": "What kinds of corrections humans make, with examples. Look for repeat mistakes that a "
                           "rule, check or test would prevent.",
-    "prompt_practice": "Sessions whose PR is merged or closed. Prompt style, specificity and task type against outcome and correction rates. Small samples: "
+    "prompt_practice": "Prompt style, specificity and task type against outcome and correction rates. Sessions "
+                       "whose PR is still open are left out. Each session's pr is merged_or_closed or none; "
+                       "totals.sessions_without_pr counts the none ones. A session with no PR has no merge to "
+                       "confirm its outcome, which is then only the classifier's reading of the transcript: say "
+                       "so when a finding rests on those sessions. Small samples: "
                        "report differences only when counts support them, and state the counts.",
     "ci": "Failed CI checks on merged or closed PRs, by failure class with log tails; flaky = the same check later passed on the same "
           "commit (a re-run fixed it). Look for flaky tests to fix, and for failures an agent could catch before pushing "
-          "(a make target, a pre-push hook, a CLAUDE.md line).",
+          "(a local task or script, a pre-push hook, a line in the agent's instruction file).",
     "review": "PR review comments on merged or closed PRs, bot vs human, split by kind (inline thread, review "
               "body, issue comment). Inline outcomes read <validity>/<thread state>: validity (valid | wrong | "
               "unclear) comes from a classifier, thread state (resolved | outdated | open) from GitHub. Other "
@@ -788,12 +816,24 @@ def save_findings(conn: sqlite3.Connection, run_id: str, kind: str, findings: li
 
 # --- main ------------------------------------------------------------------------------
 
-def main() -> None:
+# Kinds built only from GitHub data: the table each needs, and what to call it in the skip note.
+NEEDS = {"ci": ("gh_checks", "CI checks"), "review": ("gh_review_comments", "PR review comments")}
+
+
+def missing_data(conn: sqlite3.Connection, kind: str) -> str | None:
+    """Why kind can't be built from this database, or None if it can."""
+    table, what = NEEDS.get(kind, (None, None))
+    if table and not conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+        return f"no {what} in the database (needs GitHub data)"
+    return None
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--kind", choices=KINDS, help="Only this finding kind")
     parser.add_argument("--min-confidence", type=float, default=0.7, help="Ignore labels below this confidence")
     parser.add_argument("--max-evidence", type=int, default=40, help="Most evidence items per bundle")
-    parser.add_argument("--since", default="2026-08-11", help="Ignore evidence before this date (default: %(default)s)")
+    parser.add_argument("--since", default="", help="Ignore evidence before this ISO date (default: keep all)")
     parser.add_argument("--llm", choices=["claude-code", "openrouter"], default="claude-code",
                         help="claude-code: `claude -p` on the Claude subscription; openrouter: OpenRouter API")
     parser.add_argument("--parallel", type=int,
@@ -802,7 +842,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Build bundles and print them; no model call")
     parser.add_argument("--force", action="store_true", help="Call the model even when a bundle is cached")
     parser.add_argument("--db", type=Path, help="Database path (default debrief.db)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     load_dotenv()
 
     conn = connect(args.db) if args.db else connect()
@@ -823,6 +863,9 @@ def main() -> None:
     todo_tokens = 0
     print(f"{'kind':<20} {'items':>11} {'refs':>5} {'~tokens':>8} {'~cost':>8}")
     for kind in [args.kind] if args.kind else KINDS:
+        if why := missing_data(conn, kind):
+            print(f"{kind:<20} skipped: {why}")
+            continue
         bundle = bundles[kind] = ROLLUPS[kind](conn, args.min_confidence, args.max_evidence, args.since)
         user = prompts[kind] = user_prompt(kind, bundle)
         digest = digests[kind] = prompt_hash(model, user)
@@ -832,7 +875,7 @@ def main() -> None:
         cost = "sub" if subscription else f"${tokens * price:.3f}" if price is not None else "?"
         note = ""
         if not bundle_refs(bundle):
-            note = "  no evidence"
+            note = "  skipped: no evidence, nothing to send"
         elif not args.force and (hit := cached_run(conn, index, digest, kind)):
             cached[kind] = hit
             note = f"  cached from {hit}"
@@ -850,6 +893,8 @@ def main() -> None:
     print(f"bundles in {out}")
 
     if args.dry_run:
+        if not bundles:
+            return
         kind = args.kind or max(bundles, key=lambda k: len(bundle_refs(bundles[k])))
         print(f"\n--- {kind} ---\n{json.dumps(bundles[kind], indent=2, ensure_ascii=False)[:6000]}")
         return

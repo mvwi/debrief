@@ -25,10 +25,10 @@ from debrief.synthesize import CLAUDE_CODE_MODEL, ClaudeCodeError, ask_claude_co
 
 LEVERS = {
     "agent_config": "Agent instructions: CLAUDE.md, AGENTS.md, skills, slash commands",
-    "test_harness": "Tests and the local dev loop: test isolation, fixtures, make/mise tasks",
+    "test_harness": "Tests and the local dev loop: test isolation, fixtures, task runner and scripts",
     "ci_infra": "CI workflows, runners, caching, tool pins, log output",
-    "review_tooling": "Review bots and their config: Copilot, Bugbot, trail reviewers",
-    "team_practice": "How people prompt and run sessions: habits, templates, docs for humans",
+    "review_tooling": "Automated code review and its config: review bots, their rules and noise",
+    "team_practice": "How the people prompt and run sessions: habits, templates, docs for humans",
     "backlog": "A product or code bug an agent flagged in a session and didn't file during it: check it, file it",
 }
 
@@ -36,12 +36,14 @@ LEVERS = {
 KIND_LEVER = {"found_not_filed": "backlog", "ci": "ci_infra", "review": "review_tooling",
               "prompt_practice": "team_practice"}
 
-SYSTEM = f"""You turn findings about how an engineering team works with AI coding agents into a short list of
-ideas for their VP of engineering. The team builds entireio/cli, an open source Go CLI. Ideas are leads to
+SYSTEM = f"""You turn findings about how a developer or a team works with AI coding agents into a short list
+of ideas for them. "team" in the input gives the number of people; it may be one, so don't write as if there
+were several. Take the repo, language and tools from the findings; assume none. Ideas are leads to
 check, not verdicts: the labels behind them are from a classifier and some will be false positives. Suggest;
-don't tell the team what they should do.
+don't tell them what they should do.
 
-Each finding came from labeled agent sessions, CI checks or PR review comments, and cites evidence.
+Each finding came from labeled agent sessions and, when the data has them, CI checks or PR review
+comments, and cites evidence.
 Several findings often describe one problem from different angles (a hotspot file, a correction
 pattern and a knowledge gap can all be the same missing doc). Merge those.
 
@@ -60,7 +62,7 @@ Rules:
 - Backlog: exactly one recommendation per distinct bug, unless another recommendation's change already
   fixes it. Never group bugs, even small, related or single-session ones, and even if one session flagged
   them together; each backlog title names one bug, never two joined by "and".
-  Say the bug was flagged in a session and not filed during it; we can't see their issue tracker, so
+  Say the bug was flagged in a session and not filed during it; we can't see the issue tracker, so
   don't say nobody filed it.
 - "change" is the suggested change. For agent_config, give the exact text to add and the file.
   For others, name the file, workflow, setting or command. Markdown is fine; keep it under 120 words.
@@ -76,7 +78,7 @@ Rules:
   the same way. Use only raw counts of this problem's own items, with the unit named ("corrected in 6
   messages across 4 sessions").
 - "impact" is one neutral line saying what the problem is and where it shows up, with no numbers at all
-  (e.g. "Humans paste trail review findings into the session by hand, across several people's sessions").
+  (e.g. "People paste review bot findings into the session by hand, across several sessions").
   Don't promise an outcome ("removes", "saves").
 - effort: S (under an hour), M (a day or less), L (more).
 - Plain, short sentences. No hype. Do not invent facts that are not in the findings.
@@ -185,11 +187,11 @@ def save(conn, run_id: str, recs: list[dict]) -> None:
     conn.commit()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", help="Findings run_id (default: latest)")
     parser.add_argument("--dry-run", action="store_true", help="Print the prompt; no model call")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     load_dotenv()
 
     conn = connect()
