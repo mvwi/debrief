@@ -59,9 +59,13 @@ A re-run only reads logs that changed and only labels turns that are new.
 | Sends transcripts to | Anthropic, via your CLI | OpenRouter |
 | Confidence | the model's own estimate | token probabilities |
 
-On 66 turns where the two disagreed, a blind reader sided with Jev 32 times and Haiku 17 on the
-turn-level questions. Haiku misses more one-line asides in long turns. There is no human-labeled
-set behind these numbers.
+How they compare, measured on the prototype's data with no human-labeled set behind it:
+
+- On 66 turns where the two disagreed, a blind reader sided with Jev 32 times and Haiku 17 on
+  the turn-level questions. Three definitions were then tightened.
+- After that, on 155 ordinary turns, Haiku and Jev agree on 93% for "agent named a problem and
+  did not file it" (kappa 0.77) and 92% for "the agent could have found this itself" (kappa
+  0.66), where Haiku says yes about 1.7 times as often as Jev, mostly at low confidence.
 
 ## Limits in this version
 
