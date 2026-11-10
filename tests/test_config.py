@@ -120,12 +120,15 @@ def test_load_env_reads_the_key_file(cfg, monkeypatch):
 def test_picked_projects_round_trip_and_survive_other_saves(cfg):
     assert config.projects() == []
     config.save({"label": {"llm": "openrouter"}})
-    config.pick("/home/me/alpha")
-    config.pick('/home/me/odd "name"')
-    config.pick("/home/me/alpha")  # already picked
-    assert config.projects() == ["/home/me/alpha", '/home/me/odd "name"']
-    assert config.choose("label")[0] == "openrouter" and config.settings()["projects"] == config.projects()
-    for bad in ("/a", ["relative/path"], [1]):
+    odd = ['/home/me/a "quoted" name', "/home/me/back\\slash", "/home/me/caf\u00e9 \u65e5\u672c", "/home/me/alpha"]
+    for path in [*odd, "/home/me/alpha"]:  # the last is already picked
+        config.pick(path)
+    assert config.projects() == odd == config.settings()["projects"]
+    assert config.choose("label")[0] == "openrouter"
+    bad = ["/a", ["relative/path"], [1], ["/a\nb"], ["/a\x7fb"], ["/" + "a" * 500], ["/a"] * 201]
+    for include in bad:
         with pytest.raises(ValueError, match="absolute paths"):
-            config.save({"projects": {"include": bad}})
-    assert config.projects() == ["/home/me/alpha", '/home/me/odd "name"']
+            config.save({"projects": {"include": include}})
+    assert config.projects() == odd
+    config.save({"projects": {"include": []}})  # nothing picked: the table is not written
+    assert config.projects() == [] and "projects" not in cfg.read_text()

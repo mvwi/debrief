@@ -36,6 +36,8 @@ KEY = "OPENROUTER_API_KEY"
 MODEL_RE = re.compile(r"[\w./:@-]{1,100}", re.ASCII)
 KEY_RE = re.compile(r"[\w.-]{20,200}", re.ASCII)
 
+MAX_PROJECTS, MAX_PATH = 200, 500
+
 # stage -> llm -> default model. The first llm listed is the stage's default.
 DEFAULTS = {
     "label": {"claude-code": "claude-haiku-5-5", "openrouter": "typesafe/jev-1.13"},
@@ -59,8 +61,10 @@ def check(cfg: dict) -> None:
             continue
         if stage == "projects" and isinstance(table, dict):
             include = table.get("include", [])
-            if not isinstance(include, list) or not all(isinstance(p, str) and os.path.isabs(p) for p in include):
-                raise ValueError("[projects] include must be a list of absolute paths")
+            if not isinstance(include, list) or len(include) > MAX_PROJECTS or not all(
+                    isinstance(p, str) and os.path.isabs(p) and len(p) <= MAX_PATH and p.isprintable() for p in include):
+                raise ValueError(f"[projects] include must be a list of at most {MAX_PROJECTS} absolute paths, "
+                                 f"each at most {MAX_PATH} characters with no control characters")
             continue
         if stage not in DEFAULTS or not isinstance(table, dict):
             raise ValueError(f"unknown stage [{stage}]. Stages: {', '.join(DEFAULTS)}")
@@ -93,7 +97,8 @@ def save(cfg: dict) -> None:
     if "github" in cfg:
         lines += ["[github]", f"enabled = {'false' if cfg['github'].get('enabled') is False else 'true'}", ""]
     if include := cfg.get("projects", {}).get("include"):
-        # A JSON list of strings is a TOML one too, escapes included.
+        # A JSON list of strings is a TOML one too: both escape a quote and a backslash the same
+        # way, and check() has ruled out control characters.
         lines += ["[projects]", f"include = {json.dumps(include, ensure_ascii=False)}", ""]
     HOME.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_PATH.with_suffix(".toml.tmp")

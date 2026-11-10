@@ -138,11 +138,13 @@ def team_context(conn, picked: set[str]) -> dict:
     return {"sessions": len(ids), "people": people, "human_turns": human}
 
 
-def groups(findings: list[dict]) -> dict[str | None, list[dict]]:
-    """Findings per model call: one per project, and one (None) for those about all projects."""
+def groups(findings: list[dict], picked: list[str]) -> dict[str | None, list[dict]]:
+    """Findings per model call: one per picked project, and one (None) for those about all of them.
+    Findings of a project no longer picked are left out."""
     out: dict[str | None, list[dict]] = {}
     for f in findings:
-        out.setdefault(f["project"], []).append(f)
+        if f["project"] in (None, *picked):
+            out.setdefault(f["project"], []).append(f)
     return out
 
 
@@ -229,7 +231,7 @@ def main(argv: list[str] | None = None) -> None:
     run_id = args.run or latest_run(conn)
     if not run_id:
         sys.exit("no findings yet; run synthesize.py")
-    prompts = {p: (fs, prompt(conn, p, fs)) for p, fs in groups(load_findings(conn, run_id)).items()}
+    prompts = {p: (fs, prompt(conn, p, fs)) for p, fs in groups(load_findings(conn, run_id), projects()).items()}
     print(f"run {run_id}: {len(prompts)} model calls")
     for p, (fs, user) in prompts.items():
         print(f"  {short_name(p) if p else 'across projects'}: {len(fs)} findings, "

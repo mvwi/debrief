@@ -39,7 +39,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from urllib.parse import quote
 
-from debrief import db
+from debrief import config, db
 from debrief.normalize import SHELL_TOOLS, parse_ts
 
 LOG_LINES = 150
@@ -501,6 +501,12 @@ def main(argv: list[str] | None = None) -> None:
     conn.executescript(SEEN_SCHEMA)
     shas = load_shas(conn) if repo else []
     prs, pushes = (set(), {}) if repo else find_links(conn)
+    # Only the repos of picked projects: those a session run in a picked folder opened a PR in or
+    # pushed to. Other sessions' links to those repos are kept, so a worktree session still links.
+    picked = {r[0] for r in conn.execute(
+        f"SELECT session_id FROM sessions WHERE cwd IN ({', '.join('?' * len(config.projects()))})", config.projects())}
+    repos = {p[1] for p in prs if p[0] in picked} | {k[0] for k, sids in pushes.items() if sids & picked}
+    prs, pushes = {p for p in prs if p[1] in repos}, {k: v for k, v in pushes.items() if k[0] in repos}
     if args.dry_run:
         print(f"github: dry run, no requests made. {len({p[1:] for p in prs})} PRs named in the logs of "
               f"{len({p[0] for p in prs})} sessions, {len(pushes)} pushed branches to look up, "
@@ -511,7 +517,7 @@ def main(argv: list[str] | None = None) -> None:
     if repo:
         skip = None if shas else "no checkpoint commits to look up"
     else:
-        skip = None if prs or pushes else "no session pushed a branch or opened a pull request"
+        skip = None if prs or pushes else "no session of a picked project pushed a branch or opened a pull request"
     skip = skip or gh_problem()
     if skip:
         print(f"github: skipped, {skip}")
@@ -524,7 +530,7 @@ def main(argv: list[str] | None = None) -> None:
     with ThreadPoolExecutor(args.workers) as pool:
         if not repo:
             link_sessions(conn, pool, prs, pushes, args.refresh)
-        for name in [repo] if repo else sorted(stored(conn, "SELECT repo FROM session_prs")):
+        for name in [repo] if repo else sorted(stored(conn, "SELECT repo FROM session_prs") & repos):
             fetch_repo(conn, pool, name, shas, args.refresh)
     conn.close()
     print(f"{requests} gh requests")

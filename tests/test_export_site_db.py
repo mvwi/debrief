@@ -62,8 +62,8 @@ def test_local_sessions_only(tmp_path):
     by_id = {s["id"]: s for s in index["sessions"]}
     assert by_id["s1"]["project"] == "/home/me/alpha" and by_id["s2"]["project"] == "/home/me/beta"
     assert index["projects"] == [
-        {"path": "/home/me/alpha", "sessions": 1, "turns": 2, "picked": True, "analysed": None},
-        {"path": "/home/me/beta", "sessions": 1, "turns": 1, "picked": True, "analysed": None}]
+        {"path": "/home/me/alpha", "name": "alpha", "sessions": 1, "turns": 2, "picked": True, "analysed_at": None},
+        {"path": "/home/me/beta", "name": "beta", "sessions": 1, "turns": 1, "picked": True, "analysed_at": None}]
     assert by_id["s1"]["checkpoints"] is None and by_id["s1"]["author"] is None and by_id["s1"]["prs"] == []
     assert index["recommendations"] == [] and index["findings"] == {} and index["prs"] == {}
     assert index["ci"] == {"runs_by_pr": {}, "failures": []} and index["reviews"] == []
@@ -143,8 +143,8 @@ def test_projects(tmp_path):
     assert index["findings"]["1"]["project"] == "/home/me/alpha"
     # Every project is listed; only picked ones are in the report itself.
     assert index["projects"] == [
-        {"path": "/home/me/alpha", "sessions": 2, "turns": 3, "picked": True, "analysed": "2026-01-07T00:00:00Z"},
-        {"path": "/home/me/gamma", "sessions": 1, "turns": 1, "picked": False, "analysed": None}]
+        {"path": "/home/me/alpha", "name": "alpha", "sessions": 2, "turns": 3, "picked": True, "analysed_at": "2026-01-07T00:00:00Z"},
+        {"path": "/home/me/gamma", "name": "gamma", "sessions": 1, "turns": 1, "picked": False, "analysed_at": None}]
     # Nothing of the unpicked project is left: its finding, its idea, its evidence, its PR, its review comment.
     assert set(index["findings"]) == {"1", "3"} and index["findings"]["3"]["evidence"] == ["m:s1:0"]
     assert "acme/gamma#1" not in index["prs"] and [r["id"] for r in index["reviews"]] == [9]
