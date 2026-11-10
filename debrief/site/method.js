@@ -24,7 +24,7 @@ const METHOD = {
     },
     {
       id: "label", title: "Label every message", short: "Label", glance: ["{labels}", "labels"],
-      lede: "[Jev](https://typesafe.ai) answers the same questions about every human message.",
+      lede: "A small model answers the same questions about every human message: Claude Haiku by default, or [Jev](https://typesafe.ai) with --llm openrouter.",
       text: [
         "It sees the message plus everything the agent did since the person's last one, and answers:",
         "1. **Intent:** What was the message doing?\n2. **Correction:** Did it correct the agent, and how?\n3. **Pointer:** What did it point the agent to?\n4. **Reversal:** Did it reject a design the agent had already built?\n5. **Bug:** Did it catch a bug in the agent's work?\n6. **Overlooked:** Did it tell the agent something it could have found itself?\n7. **Left unfiled:** Had the agent flagged a problem and left it?",
