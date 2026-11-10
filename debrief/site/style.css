@@ -313,6 +313,17 @@ textarea { width: 100%; padding: 8px 10px; resize: vertical; min-height: 64px; }
 .settings #key { width: 260px; max-width: 100%; }
 .settings .bad { color: var(--destructive); }
 
+/* ---------- projects ---------- */
+.projects { max-width: 860px; }
+.projects .card-body { display: flex; flex-direction: column; gap: 12px; }
+.projects .bad { color: var(--destructive); }
+.projects p { margin: 0; }
+.run-row { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.run-row.start { justify-content: flex-start; }
+.run-row progress { flex: 1; min-width: 160px; height: 8px; accent-color: var(--accent); }
+.run-box { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
 /* ---------- chips ---------- */
 .pill { display: inline-flex; align-items: center; gap: 5px; padding: 0 6px; border-radius: 6px; font: 500 12px/20px var(--sans); white-space: nowrap; background: var(--surface-selected); color: var(--text-muted); }
 .pill.accent { color: var(--text-default); font-weight: 600; }

@@ -106,6 +106,11 @@ report, as they can read the files.
 `debrief open` can also run the analysis, so you need not go back to the terminal. With no
 report yet it reads your local logs first (no model calls) and serves what it found.
 
+The Projects page is where you do it: tick the projects to analyse (each tick is saved to
+`config.toml` at once), ask for an estimate, then press "Check my data now". It shows the stage
+and the count while the run goes, and has a Cancel button. When the run ends every page shows
+the new report without a refresh. Underneath it uses:
+
     GET    /api/run        state (idle, running, done, failed, cancelled), stage, done/total,
                            start and end times, exit code, last 30 lines of output
     POST   /api/run        start `debrief sync`; 409 if a run or an estimate is going

@@ -21,6 +21,7 @@ import json
 import os
 import secrets
 import signal
+import subprocess
 import sys
 import webbrowser
 
@@ -136,7 +137,7 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
     the port but does not have the link.
     """
 
-    MAX_BODY = 4096
+    MAX_BODY = 64 * 1024  # room for 200 picked project paths
     token = secrets.token_urlsafe(16)
     jobs = Runner(hide=(token,))
 
@@ -244,8 +245,10 @@ def serve(argv: list[str]) -> None:
     jobs.stop_orphan()
     if not (SITE_OUT / "data" / "index.json").exists():
         print("No report yet: reading your local logs so the page has something to show (no model calls) ...", flush=True)
-        stage("ingest", [])
-        stage("export", [])
+        # In child processes, as every later run is: a stage run here would keep its database
+        # connection open for as long as the server lives, and its lock would fail those runs.
+        for name in ("ingest", "export"):
+            subprocess.run([sys.executable, "-m", "debrief.cli", name], check=True)
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # `kill` stops a run too, as Ctrl-C does
     url = f"http://127.0.0.1:{server.server_port}/"
     url += f"?t={ReportHandler.token}"  # the page keeps the token for this tab and drops it from the address
