@@ -200,6 +200,7 @@ def test_progress_reads_stage_and_counts():
              "  8/74 done, 0 failed", "=== turns: 3 items", "\x00 garbage �", "  16/74 done, 1 failed"]
     assert progress(lines) == {"stage": "label", "done": 16, "total": 74}
     assert progress(["== synthesize"], progress(lines)) == {"stage": "synthesize", "done": None, "total": None}
+    assert progress(["== synthesize", "== canopy: 89 sessions, 871 human turns", "== all projects: 95 sessions"])["stage"] == "synthesize"
     assert progress(["what is this"], {"stage": "label", "done": 1, "total": 2}) == {"stage": "label", "done": 1, "total": 2}
     assert progress([]) == {"stage": None, "done": None, "total": None}
 

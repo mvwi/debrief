@@ -20,7 +20,8 @@ from debrief.paths import HOME
 
 SYNC = [sys.executable, "-u", "-m", "debrief.cli", "sync"]  # -u: a pipe would hold prints back
 EXPORT = [sys.executable, "-m", "debrief.cli", "export"]
-STAGE = re.compile(r"== ([\w-]+)")
+# Only the lines `sync` prints: synthesize has "== <project>: ..." headings of its own.
+STAGE = re.compile(r"== (ingest|github|label|synthesize|recommend|export)(?: |$)")
 COUNT = re.compile(r"\s*(\d+)/(\d+) done")
 WOULD = re.compile(r"would label (\d+) items in (\d+) .*? calls(?:.*about (\d+) min)?")
 
