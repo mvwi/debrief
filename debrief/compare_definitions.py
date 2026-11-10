@@ -109,14 +109,14 @@ def report_choice(rows: list[dict], idx: list[int], candidates: dict, by: dict, 
               + ", ".join(f"{y}->{p} {n}" for (y, p), n in confusions.most_common()))
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("field")
     parser.add_argument("labels", type=Path, help="jev-align run directory or labels .jsonl")
     parser.add_argument("candidates", type=Path)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--baseline", action="store_true", help="also score the baseline definition")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     current = {**classify.TURN_QUESTIONS, **classify.REVIEW_QUESTIONS,
                "found_not_filed": classify.FOUND_NOT_FILED}[args.field]
