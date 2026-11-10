@@ -91,6 +91,25 @@ report, as they can read the files.
   four characters and never the key. `OPENROUTER_API_KEY` set in your shell wins over the saved one.
 - The server takes these writes only from a page it served itself, on `127.0.0.1`.
 
+### Run from the page
+
+`debrief open` can also run the analysis, so you need not go back to the terminal. With no
+report yet it reads your local logs first (no model calls) and serves what it found.
+
+    GET    /api/run        state (idle, running, done, failed, cancelled), stage, done/total,
+                           start and end times, exit code, last 30 lines of output
+    POST   /api/run        start `debrief sync`; 409 if a run or an estimate is going
+    DELETE /api/run        stop the run and the `claude -p` calls it started
+    POST   /api/estimate   run `debrief sync --dry-run`, rebuild the pages, return the counts
+
+- The writes need the same token as the Settings page. Nothing in a request reaches the command
+  line: what to analyse comes from `config.toml`.
+- One run at a time. Its output is in `~/.local/share/debrief/run.log`, replaced on each run,
+  with the OpenRouter key blanked.
+- Ctrl-C stops a run too. If the server is killed outright, the next `debrief open` or the
+  next start stops the run it left behind.
+- A stopped run loses little: labels and bundles are kept, so the next run goes on from there.
+
 How they compare, measured on the prototype's data with no human-labeled set behind it:
 
 - On 66 turns where the two disagreed, a blind reader sided with Jev 32 times and Haiku 17 on
