@@ -1,9 +1,9 @@
 """Drop sessions last active before a date, and the GitHub rows only they link to.
 
-Removes their data/raw/<id>/ folders and their rows in sessions, checkpoints, messages,
-tool_calls, turn_labels and session_labels. Then drops GitHub rows no remaining session
-reaches: commit links and seen-markers for commits that are no longer checkpoints, PRs no
-remaining commit is in, checks on commits that are neither a kept checkpoint nor a kept PR's
+Removes their data/raw/<id>/ folders and their rows in sessions, checkpoints, session_prs,
+messages, tool_calls, turn_labels and session_labels. Then drops GitHub rows no remaining
+session reaches: commit links and seen-markers for commits that are no longer checkpoints
+nor in a kept local session's PR, PRs no remaining commit is in, checks on commits that are neither a kept checkpoint nor a kept PR's
 head, comments on dropped PRs, and event labels of dropped checks and comments. Raw folders
 with no session row go too when their listing.json is older than the date, or when empty.
 findings, recommendations and evidence_checks stay as history. Ends with VACUUM.
@@ -20,19 +20,21 @@ from pathlib import Path
 from debrief import db
 from debrief.paths import RAW_DIR
 
-SESSION_TABLES = ["sessions", "checkpoints", "messages", "tool_calls", "turn_labels", "session_labels"]
+SESSION_TABLES = ["sessions", "checkpoints", "session_prs", "messages", "tool_calls", "turn_labels", "session_labels"]
 GH_TABLES = ["gh_commit_prs", "gh_commits_seen", "gh_prs", "gh_checks", "gh_review_comments", "event_labels"]
 
 # Each runs after the session rows are gone, in this order, since later ones read earlier results.
 KEPT_COMMITS = "SELECT commit_sha FROM checkpoints WHERE commit_sha IS NOT NULL"
 GH_DELETES = [
-    f"DELETE FROM gh_commit_prs WHERE commit_sha NOT IN ({KEPT_COMMITS})",
+    (f"DELETE FROM gh_commit_prs WHERE commit_sha NOT IN ({KEPT_COMMITS}) "
+     "AND (repo, pr_number) NOT IN (SELECT repo, pr_number FROM session_prs)"),
     f"DELETE FROM gh_commits_seen WHERE commit_sha NOT IN ({KEPT_COMMITS})",
-    "DELETE FROM gh_prs WHERE pr_number NOT IN (SELECT pr_number FROM gh_commit_prs)",
+    "DELETE FROM gh_prs WHERE (repo, pr_number) NOT IN (SELECT repo, pr_number FROM gh_commit_prs)",
     # github.py also lists checks on PR heads, which need not be checkpoint commits.
     (f"DELETE FROM gh_checks WHERE commit_sha NOT IN ({KEPT_COMMITS}) "
-     "AND commit_sha NOT IN (SELECT head_sha FROM gh_prs WHERE head_sha IS NOT NULL)"),
-    "DELETE FROM gh_review_comments WHERE pr_number NOT IN (SELECT pr_number FROM gh_prs)",
+     "AND commit_sha NOT IN (SELECT head_sha FROM gh_prs WHERE head_sha IS NOT NULL) "
+     "AND commit_sha NOT IN (SELECT commit_sha FROM gh_commit_prs)"),
+    "DELETE FROM gh_review_comments WHERE (repo, pr_number) NOT IN (SELECT repo, pr_number FROM gh_prs)",
     ("DELETE FROM event_labels WHERE event_type = 'review_comment' "
      "AND event_id NOT IN (SELECT comment_id FROM gh_review_comments)"),
     "DELETE FROM event_labels WHERE event_type = 'check_failure' AND event_id NOT IN (SELECT check_id FROM gh_checks)",
@@ -94,7 +96,7 @@ def main(argv: list[str] | None = None) -> None:
     assert not conn.execute("SELECT 1 FROM sessions WHERE last_activity_at < ?", (args.before,)).fetchone()
     lost = conn.execute(f"SELECT COUNT(DISTINCT commit_sha) FROM ({KEPT_COMMITS}) WHERE commit_sha NOT IN "
                         "(SELECT commit_sha FROM gh_commits_seen UNION SELECT commit_sha FROM gh_commit_prs)").fetchone()[0]
-    assert not conn.execute("SELECT 1 FROM gh_commit_prs WHERE pr_number NOT IN (SELECT pr_number FROM gh_prs)"
+    assert not conn.execute("SELECT 1 FROM gh_commit_prs WHERE (repo, pr_number) NOT IN (SELECT repo, pr_number FROM gh_prs)"
                             ).fetchone(), "a kept commit links to a PR that is gone"
     print(f"  {lost} kept checkpoint commits were never looked up (github.py fetches those as before)")
 

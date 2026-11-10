@@ -132,7 +132,9 @@ const lever = (k) => {
   const head = desc.split(":")[0];
   return desc.includes(":") && head.length <= 32 ? head : String(k).replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 };
-const prLink = (n) => { const url = state.data.prs[n]?.url; return url ? `<a href="${esc(url)}" target="_blank" rel="noopener">#${n}</a>` : `#${n}`; };
+// A PR's key is "owner/name#12". The repo's name shows only when the report spans several repos.
+const prLabel = (k) => { const [repo, n] = String(k).split("#"); return esc(state.data.meta.repo ? `#${n}` : `${repo.split("/").pop()}#${n}`); };
+const prLink = (k) => { const url = state.data.prs[k]?.url; return url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${prLabel(k)}</a>` : prLabel(k); };
 // "3 of 40 messages", or "No messages" rather than "0 of 0".
 const ofText = (a, b, unit) => (b ? `${fmt(a)} of ${fmt(b)} ${unit}` : `No ${unit}`);
 const sessionHref = (id, idx) => `#session~${id}${idx != null ? "~" + idx : ""}`;

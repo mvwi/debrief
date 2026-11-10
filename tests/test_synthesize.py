@@ -29,9 +29,9 @@ def add_session(conn, sid: str, commit: str | None = None) -> None:
 
 
 def add_pr(conn, number: int, commit: str, merged: bool) -> None:
-    conn.execute("INSERT INTO gh_prs (pr_number, state, merged) VALUES (?, ?, ?)",
+    conn.execute("INSERT INTO gh_prs (repo, pr_number, state, merged) VALUES ('acme/widgets', ?, ?, ?)",
                  (number, "closed" if merged else "open", int(merged)))
-    conn.execute("INSERT INTO gh_commit_prs VALUES (?, ?)", (commit, number))
+    conn.execute("INSERT INTO gh_commit_prs (commit_sha, repo, pr_number) VALUES (?, 'acme/widgets', ?)", (commit, number))
 
 
 def add_check(conn, check_id: int, name: str, conclusion: str, log: str | None = None, app: str = "github-actions"):

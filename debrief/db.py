@@ -108,15 +108,37 @@ CREATE TABLE IF NOT EXISTS source_entries (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS source_entries_session ON source_entries (session_id);
 
+-- PRs a local session opened or pushed to, read from its own gh and git output (github.py).
+-- Entire sessions link through checkpoints instead.
+CREATE TABLE IF NOT EXISTS session_prs (
+    session_id TEXT NOT NULL,
+    repo       TEXT NOT NULL,        -- owner/name
+    pr_number  INTEGER NOT NULL,
+    source     TEXT,                 -- url (printed by gh pr create) | branch (a branch the session pushed)
+    PRIMARY KEY (session_id, repo, pr_number)
+);
+
 CREATE TABLE IF NOT EXISTS gh_prs (
-    pr_number  INTEGER PRIMARY KEY,
+    repo       TEXT NOT NULL,        -- owner/name
+    pr_number  INTEGER NOT NULL,
     title      TEXT,
     state      TEXT,
     merged     INTEGER,
     author     TEXT,
     head_sha   TEXT,
     created_at TEXT,
-    url        TEXT
+    url        TEXT,
+    merged_at  TEXT,
+    closed_at  TEXT,
+    PRIMARY KEY (repo, pr_number)
+);
+
+CREATE TABLE IF NOT EXISTS gh_commit_prs (
+    commit_sha   TEXT NOT NULL,
+    repo         TEXT NOT NULL,
+    pr_number    INTEGER NOT NULL,
+    committed_at TEXT,               -- set for commits listed from a local session's PR
+    PRIMARY KEY (commit_sha, repo, pr_number)
 );
 
 -- A PR is settled once merged or closed. Outcome, review and CI analyses should
@@ -124,11 +146,22 @@ CREATE TABLE IF NOT EXISTS gh_prs (
 CREATE VIEW IF NOT EXISTS settled_prs AS
     SELECT * FROM gh_prs WHERE merged = 1 OR state = 'closed';
 
-CREATE TABLE IF NOT EXISTS gh_commit_prs (
-    commit_sha TEXT NOT NULL,
-    pr_number  INTEGER NOT NULL,
-    PRIMARY KEY (commit_sha, pr_number)
-);
+-- The PRs each session worked on.
+CREATE VIEW IF NOT EXISTS session_pr_links AS
+    SELECT session_id, repo, pr_number FROM session_prs
+    UNION
+    SELECT cp.session_id, g.repo, g.pr_number FROM checkpoints cp JOIN gh_commit_prs g ON g.commit_sha = cp.commit_sha;
+
+-- The commits whose checks count for each session: its checkpoints, or the commits of its
+-- PRs made while it ran. Two sessions on one PR each get only their own commits.
+CREATE VIEW IF NOT EXISTS session_commits AS
+    SELECT session_id, commit_sha FROM checkpoints WHERE commit_sha IS NOT NULL
+    UNION
+    SELECT sp.session_id, g.commit_sha FROM session_prs sp
+    JOIN sessions s ON s.session_id = sp.session_id
+    JOIN gh_commit_prs g ON g.repo = sp.repo AND g.pr_number = sp.pr_number
+    WHERE datetime(g.committed_at) BETWEEN datetime(s.started_at, '-10 minutes')
+                                       AND datetime(s.last_activity_at, '+10 minutes');
 
 CREATE TABLE IF NOT EXISTS gh_checks (
     check_id     INTEGER PRIMARY KEY,
@@ -139,7 +172,8 @@ CREATE TABLE IF NOT EXISTS gh_checks (
     run_id       INTEGER,            -- Actions run, when there is one
     started_at   TEXT,
     completed_at TEXT,
-    failure_log  TEXT                -- tail of the failed step's log, failures only
+    failure_log  TEXT,               -- tail of the failed step's log, failures only
+    repo         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gh_review_comments (
@@ -151,7 +185,8 @@ CREATE TABLE IF NOT EXISTS gh_review_comments (
     line        INTEGER,
     body        TEXT,
     in_reply_to INTEGER,
-    created_at  TEXT
+    created_at  TEXT,
+    repo        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS event_labels (
@@ -216,8 +251,6 @@ ADDED_COLUMNS = [
     ("source_logs", "human_turns", "INTEGER"),   # after copied entries are left out; NULL when the log was not parsed
     ("source_logs", "parser", "INTEGER"),        # normalize.PARSER_VERSION the log was last read with
     ("tool_calls", "exit_code", "INTEGER"),  # shell exit code when the format records one
-    ("gh_prs", "merged_at", "TEXT"),
-    ("gh_prs", "closed_at", "TEXT"),
     ("gh_review_comments", "kind", "TEXT"),          # inline | review | issue (general PR discussion)
     ("gh_review_comments", "review_state", "TEXT"),  # APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED; review rows only
     ("gh_review_comments", "is_resolved", "INTEGER"),  # thread resolved; inline rows only
@@ -225,10 +258,37 @@ ADDED_COLUMNS = [
 ]
 
 
+def add_repo(conn: sqlite3.Connection) -> None:
+    """Move a database from before the gh_* tables named their repo. It held one repo, read
+    here from a PR's URL. SQLite cannot change a primary key, so gh_prs and gh_commit_prs are
+    rebuilt; SCHEMA then creates the new tables and the rows are copied in. One transaction."""
+    old = {t: [r["name"] for r in conn.execute(f"PRAGMA table_info({t})")] for t in ("gh_prs", "gh_commit_prs")}
+    if not old["gh_prs"] or "repo" in old["gh_prs"]:
+        return
+    url = conn.execute("SELECT url FROM gh_prs WHERE url LIKE 'https://github.com/%/%/pull/%'").fetchone()
+    repo = "/".join(url[0].split("/")[3:5]) if url else ""
+    create = [stmt for stmt in SCHEMA.split(";") if "CREATE TABLE IF NOT EXISTS gh_prs" in stmt
+              or "CREATE TABLE IF NOT EXISTS gh_commit_prs" in stmt]
+    conn.execute("BEGIN")
+    with conn:
+        conn.execute("DROP VIEW IF EXISTS settled_prs")  # reads gh_prs; SCHEMA makes it again
+        for table in old:
+            conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+        for stmt in create:
+            conn.execute(stmt)
+        for table, columns in old.items():
+            conn.execute(f"INSERT INTO {table} (repo, {', '.join(columns)}) SELECT ?, * FROM {table}_old", (repo,))
+            conn.execute(f"DROP TABLE {table}_old")
+        for table in ("gh_checks", "gh_review_comments"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN repo TEXT")
+            conn.execute(f"UPDATE {table} SET repo = ?", (repo,))
+
+
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
+    add_repo(conn)
     conn.executescript(SCHEMA)
     for table, column, type_ in ADDED_COLUMNS:
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
