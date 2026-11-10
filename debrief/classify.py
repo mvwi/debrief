@@ -72,16 +72,21 @@ def score(instructions: str, *levels: str) -> dict:
 # turns (compare_definitions.py). Test failures blamed on the environment count as true: they
 # point at infra or dev-setup fixes.
 FOUND_NOT_FILED = noul(
-    "In the agent activity shown, does the agent name a concrete problem that lies outside what "
-    "the human asked it to do, and explicitly leave it unaddressed?",
-    "The agent flags a bug, flaw, missing safeguard or failing test that it calls pre-existing, "
-    "unrelated to this change, or out of scope, and leaves it for later, another PR, or the human. "
-    "E.g. 'that's pre-existing, so I'll leave it for its own PR'; 'this test also fails on main, not "
-    "caused by this change'; 'the sandbox blocks keychain access so that test fails here; unrelated'.",
+    "Anywhere in the agent activity shown, does the agent name a concrete problem that lies outside what "
+    "the human asked it to do, and explicitly leave it unaddressed? Read every agent message to the end: "
+    "this is often a single aside inside a longer report.",
+    "The agent flags a bug, flaw, missing safeguard or failing test that it calls pre-existing, flaky, "
+    "unrelated to this change, or out of scope, and leaves it for later, another PR, or the human. One "
+    "passing line is enough. E.g. 'that's pre-existing, so I'll leave it for its own PR'; 'this test also "
+    "fails on main, not caused by this change'; 'the sandbox blocks keychain access so that test fails "
+    "here; unrelated'. When the human asked only for a diagnosis ('why is CI broken?'), it is true if the "
+    "agent traces the cause to such a problem and leaves the fix out of the current work ('the bug is on "
+    "main; that belongs in a separate PR').",
     "Anything else, including: findings from a review, audit or cleanup pass the human asked for "
     "(/simplify, /code-review), even ones the agent chooses to skip; the agent analysing or planning "
-    "the requested work; differences or tradeoffs the user asked for; progress or status notes; the "
-    "human, not the agent, deferring something.",
+    "the requested work; a requested diagnosis that names a cause without setting its fix aside; "
+    "differences or tradeoffs the user asked for; progress or status notes; the human, not the agent, "
+    "deferring something.",
 )
 
 TURN_QUESTIONS = {
@@ -119,16 +124,21 @@ TURN_QUESTIONS = {
     # Hand-edited after jev-align round 2 (2026-09-25): train F1 0.64 -> 0.84 on 60 agent-labeled
     # turns; held-out false positives 5 -> 0 of 11.
     "agent_could_have_found_it": noul(
-        "Is the human surfacing information the agent had access to but did not find or check itself?",
-        "The human states, rather than asks, something the agent could already reach with its own "
-        "tools: code behavior, file contents or locations, test or command results, merge conflicts, "
-        "git, PR, CI or review state (a PR is merged, a finding is open), review findings about the "
-        "branch, or that a spec, doc or endpoint exists. A hunch stated as fact counts, and so does a "
-        "rhetorical question that points at such a source.",
-        "Anything else, including: real questions, even ones naming files or lines; instructions, "
-        "decisions, preferences or approvals; a new task or a session-opening brief, even one full of "
-        "facts; clarifying what the human meant; content from outside the agent's reach (support "
-        "threads, emails, a coworker's machine, a login only the human could complete).",
+        "Does the human message carry a fact the agent had access to but did not find or check itself?",
+        "Judge by content, not grammar. The message tells the agent, or takes for granted, a specific "
+        "fact the agent could reach with its own tools and that the activity shown does not have it "
+        "finding: code behavior, file contents or locations, test or command results, merge conflicts, "
+        "git, PR, CI or review state (a PR is merged, a finding is open, a branch exists), review "
+        "findings about the branch, or that a spec, doc or endpoint exists. The fact may arrive as a "
+        "statement, a hunch stated as fact, an instruction ('take a look at the fix-auth branch' tells "
+        "the agent that branch exists), or a question that presupposes it ('did you see the finding on "
+        "the PR?'). It counts even when it became true only after the agent last checked (a PR merged "
+        "since), and when an instruction, approval or decision comes with it.",
+        "The message carries no such fact, including: questions the human does not know the answer to, "
+        "even ones naming files or lines; instructions, decisions, preferences or approvals on their own; "
+        "pointing back at something the agent has just found or handled; a new task or a session-opening "
+        "brief, even one full of facts; clarifying what the human meant; content from outside the agent's "
+        "reach (support threads, emails, a coworker's machine, a login only the human could complete).",
     ),
     # Hand-edited after agent labeling (2026-09-25): train F1 0.48 -> 0.85 on 60 agent-labeled turns;
     # held-out 0.45 -> 0.83 on 20. Relayed findings count as false: agent_could_have_found_it covers them.
@@ -162,10 +172,12 @@ TURN_QUESTIONS = {
         "requests. E.g. 'make --json 1-1 with the API response' after the agent built custom output "
         "types; 'why is the change so large, the fix is just to store tokens.json'; 'don't use python "
         "for the matrix, simpler way?'; 'stop, revert what you just did'; 'I deleted that method, "
-        "check the code and fix the test'.",
+        "check the code and fix the test'. An approach the agent proposed and the human only approved "
+        "is still the agent's: asking to undo or replace it once built is true.",
         "Anything else, including: fixing a specific field, text or bug in work that is otherwise kept "
         "('we don't need the $schema field', 'no, we are keeping checkpointCount'); stopping or "
-        "narrowing scope; the human changing their own earlier request; criticism of a plan the agent "
+        "narrowing scope; the human replacing an approach they themselves specified, as opposed to one "
+        "they only approved; criticism of a plan the agent "
         "only proposed; a bare 'yes' to the agent's own offer to redo; review findings to repair; "
         "questions; new requirements; clarifying which scenario to test.",
     ),
@@ -210,8 +222,11 @@ SESSION_QUESTIONS = {
     ),
     "tests_added": noul(
         "Did the session add or change tests?",
-        "Tests added or changed",
-        "No test changes",
+        "The 'Test files written' list names a file, or a commit or agent message says tests were added "
+        "or changed.",
+        "Nothing shows a test change: no test file is listed and no commit or agent message says so. "
+        "Running tests, or mentioning them, is not a change. An empty list proves nothing by itself when "
+        "no file writes were recorded.",
     ),
     "outcome": choice(
         "How did the session end?",
@@ -268,6 +283,10 @@ CHECK_QUESTIONS = {
         other="Something else",
     ),
 }
+
+# Paths that look like tests: a tests/ or spec/ directory, test_x.py, x_test.go, x.test.ts, x.spec.js.
+TEST_PATH = re.compile(r"(?i)(^|/)(tests?|__tests__|specs?|e2e)/|(^|/)test_[^/]*$|[_.-](test|spec)\.[^/.]+$")
+TEST_FILES_SHOWN = 15
 
 KEYS = {"turn_labels": ("session_id", "msg_idx"), "session_labels": ("session_id",),
         "event_labels": ("event_type", "event_id")}
@@ -356,6 +375,7 @@ def session_state(conn, sess, msgs: list, calls: dict) -> str:
     ).fetchall()
     all_calls = [c for cs in calls.values() for c in cs]
     written = {f for c in all_calls if c["writes"] for f in json.loads(c["files"] or "[]")}
+    tests = sorted(f for f in written if TEST_PATH.search(f))
     tail = [m["text"] for m in msgs if m["role"] == "assistant" and (m["text"] or "").strip()][-2:]
     lines = [
         f"## Session: {sess['display_name'] or '(no name)'}",
@@ -365,6 +385,10 @@ def session_state(conn, sess, msgs: list, calls: dict) -> str:
         *(["(none)"] if not commits else []),
         (f"\n## Counts\nhuman messages: {len(humans)}, tool calls: {len(all_calls)}, "
         f"tool errors: {sum(1 for c in all_calls if c['is_error'])}, files written: {len(written)}"),
+        f"\n## Test files written ({len(tests)})",
+        *[f"- {f}" for f in tests[:TEST_FILES_SHOWN]],
+        *([] if tests else [f"(none among the {len(written)} files written)"] if written else
+          ["(no file writes recorded: the agent may have written files through shell commands)"]),
         "\n## Last agent messages",
         *[clip(t, TAIL_TEXT_CAP) for t in tail],
     ]
