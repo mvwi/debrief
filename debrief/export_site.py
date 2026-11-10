@@ -43,24 +43,41 @@ SIGNALS = {
 }
 CORRECTING = ("correction", "reversal", "defect")  # together, the site's "Agent corrected"
 
-# Secret-shaped strings, redacted from the serialized JSON before it's written (the site is public).
-# Patterns stop at quotes and backslashes so a redaction can't break the JSON around it.
+# Secret-shaped strings, redacted from every string before it is serialized. Redacting the
+# serialized JSON instead misses a secret that follows an escape: in "\nghp_..." the "n" of
+# the escape is a word character, so \b never matches.
 SECRETS = [
     (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})"), "[redacted]"),
     (re.compile(r"\bsk-(?=[A-Za-z0-9_-]*\d)(?:ant-|proj-|or-v1-)?[A-Za-z0-9_-]{20,}"), "[redacted]"),  # needs a digit
+    (re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"), "[redacted]"),  # Stripe
     (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "[redacted]"),
-    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"), "[redacted]"),
+    (re.compile(r"\bxox[abeprs]-[A-Za-z0-9-]{10,}"), "[redacted]"),
+    (re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"), "[redacted]"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{35}"), "[redacted]"),  # Google API key
+    (re.compile(r"\b(?:npm|hf)_[A-Za-z0-9]{30,}"), "[redacted]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "[redacted]"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[^\"\\]|\\.)*?-----END [A-Z ]*PRIVATE KEY-----"), "[redacted]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.DOTALL), "[redacted]"),
     (re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]{24,}=*"), r"\1[redacted]"),
     (re.compile(r"(https?://)[^/\s:@\"\\]+:[^/\s@\"\\]+@"), r"\1[redacted]@"),
 ]
 
 
 def redact(text: str) -> str:
+    """Redact secrets in one plain (not JSON-encoded) string."""
     for pattern, repl in SECRETS:
         text = pattern.sub(repl, text)
     return text
+
+
+def redact_tree(obj):
+    """Redact every string value in a JSON-like structure."""
+    if isinstance(obj, str):
+        return redact(obj)
+    if isinstance(obj, (list, tuple)):
+        return [redact_tree(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: redact_tree(v) for k, v in obj.items()}
+    return obj
 
 
 def excerpt(text, n: int) -> str:
@@ -525,8 +542,8 @@ def main(argv: list[str] | None = None) -> None:
     for stale in shard_dir.glob("*.json"):
         stale.unlink()
     # Transcripts can carry U+FFFD where the source had undecodable bytes; the artifact host rejects it.
-    blobs = {s["id"]: redact(json.dumps(session_file(conn, labels, s["id"]), ensure_ascii=False, separators=(",", ":"))
-                            .replace("\ufffd", ""))
+    blobs = {s["id"]: json.dumps(redact_tree(session_file(conn, labels, s["id"])), ensure_ascii=False,
+                                separators=(",", ":")).replace("\ufffd", "")
              for s in sessions}
     shards = pack_shards(blobs)
     shard_of = {}
@@ -536,7 +553,7 @@ def main(argv: list[str] | None = None) -> None:
         shard_of.update(dict.fromkeys(ids, name))
     for s in sessions:
         s["shard"] = shard_of[s["id"]]
-    (out / "index.json").write_text(redact(json.dumps(index, ensure_ascii=False, separators=(",", ":")).replace("\ufffd", "")))
+    (out / "index.json").write_text(json.dumps(redact_tree(index), ensure_ascii=False, separators=(",", ":")).replace("\ufffd", ""))
     size = sum(p.stat().st_size for p in out.rglob("*.json"))
     print(f"run {run_id or '(none yet)'}: {len(recs)} recommendations, {len(findings)} findings, {len(sessions)} sessions "
           f"in {len(shards)} shards; {size / 1e6:.1f} MB in {out}")
