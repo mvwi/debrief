@@ -70,13 +70,17 @@ def redact(text: str) -> str:
 
 
 def redact_tree(obj):
-    """Redact every string value in a JSON-like structure."""
+    """Redact every string, keys included, in a JSON-like structure.
+
+    U+FFFD (left where the source had undecodable bytes; the artifact host rejects it) goes
+    first: stripping it afterwards could join the two halves of a secret it had split.
+    """
     if isinstance(obj, str):
-        return redact(obj)
+        return redact(obj.replace("\ufffd", ""))
     if isinstance(obj, (list, tuple)):
         return [redact_tree(v) for v in obj]
     if isinstance(obj, dict):
-        return {k: redact_tree(v) for k, v in obj.items()}
+        return {redact_tree(k): redact_tree(v) for k, v in obj.items()}
     return obj
 
 
@@ -541,9 +545,8 @@ def main(argv: list[str] | None = None) -> None:
     shard_dir.mkdir(parents=True, exist_ok=True)
     for stale in shard_dir.glob("*.json"):
         stale.unlink()
-    # Transcripts can carry U+FFFD where the source had undecodable bytes; the artifact host rejects it.
     blobs = {s["id"]: json.dumps(redact_tree(session_file(conn, labels, s["id"])), ensure_ascii=False,
-                                separators=(",", ":")).replace("\ufffd", "")
+                                separators=(",", ":"))
              for s in sessions}
     shards = pack_shards(blobs)
     shard_of = {}
@@ -553,7 +556,7 @@ def main(argv: list[str] | None = None) -> None:
         shard_of.update(dict.fromkeys(ids, name))
     for s in sessions:
         s["shard"] = shard_of[s["id"]]
-    (out / "index.json").write_text(json.dumps(redact_tree(index), ensure_ascii=False, separators=(",", ":")).replace("\ufffd", ""))
+    (out / "index.json").write_text(json.dumps(redact_tree(index), ensure_ascii=False, separators=(",", ":")))
     size = sum(p.stat().st_size for p in out.rglob("*.json"))
     print(f"run {run_id or '(none yet)'}: {len(recs)} recommendations, {len(findings)} findings, {len(sessions)} sessions "
           f"in {len(shards)} shards; {size / 1e6:.1f} MB in {out}")

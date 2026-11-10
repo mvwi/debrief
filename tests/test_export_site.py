@@ -39,3 +39,9 @@ def test_private_key():
 
 def test_tree_keeps_other_types():
     assert redact_tree({"n": 1, "x": None, "ok": True, "s": "plain"}) == {"n": 1, "x": None, "ok": True, "s": "plain"}
+
+
+def test_replacement_char_cannot_hide_a_secret():
+    split = GH[:10] + "\ufffd" + GH[10:]
+    out = json.dumps(redact_tree({split: split}), ensure_ascii=False)
+    assert GH not in out and "\ufffd" not in out and out.count("[redacted]") == 2
