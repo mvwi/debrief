@@ -143,7 +143,7 @@ def test_key_goes_in_and_never_comes_out(api):
     ("POST", "/api/settings", GOOD, JSON | {"Content-Type": "text/plain"}, 415),
     ("POST", "/api/key", {"key": FAKE_KEY}, TOKEN, 415),
     ("DELETE", "/api/key", None, TOKEN, 415),
-    ("POST", "/api/settings", GOOD | {"pad": "x" * 70000}, JSON, 413),
+    ("POST", "/api/settings", GOOD | {"pad": "x" * 140000}, JSON, 413),
     ("POST", "/api/settings", b"{not json", JSON, 400),
     ("POST", "/api/settings", [1], JSON, 400),
     ("POST", "/api/settings", {"stages": GOOD["stages"]}, JSON, 400),                             # no github
@@ -266,7 +266,7 @@ def test_estimate_runs_the_dry_run_then_export(api):
     for method, path in (("POST", "/api/run"), ("DELETE", "/api/run"), ("POST", "/api/estimate"))
     for headers, want in ((JSON | {"Host": "evil.example"}, 403), ({"Content-Type": "application/json"}, 403),
                           (JSON | {"X-Debrief-Token": "wrong"}, 403), (JSON | {"Origin": "http://evil.example"}, 403),
-                          (TOKEN, 415), (JSON | {"Content-Length": "70000"}, 413))
+                          (TOKEN, 415), (JSON | {"Content-Length": "140000"}, 413))
 ] + [("GET", "/api/run", {"Host": "evil.example"}, 403), ("PUT", "/api/run", JSON, 501),
      ("GET", "/api/estimate", {}, 404)])
 def test_refused_run_requests_start_and_stop_nothing(api, method, path, headers, want):

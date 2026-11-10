@@ -137,7 +137,7 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
     the port but does not have the link.
     """
 
-    MAX_BODY = 64 * 1024  # room for 200 picked project paths
+    MAX_BODY = 128 * 1024  # room for 200 picked project paths
     token = secrets.token_urlsafe(16)
     jobs = Runner(hide=(token,))
 
