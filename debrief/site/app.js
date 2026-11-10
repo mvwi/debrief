@@ -946,7 +946,7 @@ function viewDelivery() {
   // Checks data holds only each check's latest attempt, so re-run passes show up only once data has retries.
   const reruns = fails.filter((f) => f.flaky).length;
   const rerunTip = "Seen, not judged: the same check failed, then passed later on the same commit. Flaky test is a cause read from the log, so the two counts needn't match.";
-  const failNote = `${plural(fails.length, "failed run")} on merged or closed PRs in this window. The rest of the ${fmt(state.data.meta.check_failures)} failed runs on record are on open PRs or an approval gate, or before the window.`;
+  const failNote = `${plural(fails.length, "failed run")} on merged or closed PRs in this window.${fails.length < state.data.meta.check_failures ? ` The rest of the ${fmt(state.data.meta.check_failures)} failed runs on record are on open PRs or an approval gate, or before the window.` : ""}`;
   // A share of nothing is a dash, not 0%.
   const share100 = (a, b) => (b ? pct(a, b) : "—");
   const unit = (b) => (b ? "%" : "");
