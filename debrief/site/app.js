@@ -45,6 +45,7 @@ const ICONS = {
   delivery: '<circle cx="4" cy="3.5" r="1.5"/><circle cx="4" cy="12.5" r="1.5"/><circle cx="12" cy="12.5" r="1.5"/><path d="M4 5v6M12 11V6.5a2 2 0 00-2-2H7M8.5 3L7 4.5 8.5 6"/>',
   sessions: '<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 6.5l2 1.5-2 1.5M8 9.5h3"/>',
   method: '<path d="M3 2.5h7.5a2 2 0 012 2v9H5a2 2 0 01-2-2z"/><path d="M3 11.5a2 2 0 012-2h7.5M6 5.5h4"/>',
+  projects: '<path d="M1.5 4a1.5 1.5 0 011.5-1.5h3l1.5 2H13A1.5 1.5 0 0114.5 6v6a1.5 1.5 0 01-1.5 1.5H3A1.5 1.5 0 011.5 12z"/>',
   settings: '<path d="M2 4.5h5M11 4.5h3M2 11.5h3M9 11.5h5"/><circle cx="9" cy="4.5" r="2"/><circle cx="7" cy="11.5" r="2"/>',
 };
 const PAGES = [
@@ -55,6 +56,7 @@ const PAGES = [
   { id: "delivery", label: "CI & review", needs: "github" },
   { id: "sessions", label: "Sessions" },
   { id: "method", label: "How it works", secondary: true },
+  { id: "projects", label: "Projects", secondary: true },
   { id: "settings", label: "Settings", secondary: true },
 ];
 
@@ -77,6 +79,9 @@ const state = {
   lastPage: null,
   settings: null,     // what GET api/settings returned, edited in place until saved
   settingsMsg: null,  // { at: "save" | "key", text, bad }
+  // The Projects page. settings: its own copy of GET api/settings, so a tick never saves the Settings
+  // page's unsaved edits. picked: what the boxes show. status: what GET api/run last said.
+  run: { settings: null, picked: [], status: null, est: null, stale: false, estimating: false, saves: 0, saveMsg: null, showAll: false, logOpen: false, refused: "", shownRun: null },
 };
 
 
@@ -179,14 +184,14 @@ const notice = (title, text) => `<section class="card"><div class="card-body"><h
 const NOTICES = {
   // The report holds picked projects only; index.json's projects lists the rest.
   sessions: () => (state.data.projects?.length
-    ? notice("No project picked", `debrief found ${plural(state.data.projects.length, "project")} and analyses only the ones you pick. Run <code>debrief sync</code> to list them, then <code>debrief sync --project DIR</code> to pick one.`)
+    ? notice("No project picked", `debrief found ${plural(state.data.projects.length, "project")} and analyses only the ones you pick. <a href="#projects">Pick projects and check them</a>. <code>debrief sync --project DIR</code> in a terminal also works.`)
     : notice("No sessions yet", "debrief found no agent sessions to report on. Run <code>debrief sync</code> to import them.")),
-  labels: () => notice("Sessions imported, not analysed yet", `${plural(state.data.sessions.length, "session")} to <a href="#sessions">browse</a>, but none is labelled yet, so there are no correction rates or ideas. Run <code>debrief sync</code> to label them.`),
+  labels: () => notice("Sessions imported, not analysed yet", `${plural(state.data.sessions.length, "session")} to <a href="#sessions">browse</a>, but none is labelled yet, so there are no correction rates or ideas. <a href="#projects">Check your data</a> to label them.`),
   // A picked project can have none while the run has some.
   ideas: () => (state.scope.project && state.data.recommendations.length
     ? notice("No ideas for this project", `No idea in this run is about ${esc(workspaceLabel())} or cites its sessions.`)
     : NOTICES.noIdeas()),
-  noIdeas: () => notice("No ideas yet", "The messages are labelled, but no findings or ideas have been written from them. Run <code>debrief sync</code> to finish the analysis."),
+  noIdeas: () => notice("No ideas yet", "The messages are labelled, but no findings or ideas have been written from them. <a href=\"#projects\">Check your data</a> to finish the analysis."),
 };
 const correctedTurns = (s) => s.friction.filter(([, sig]) => sig.some((x) => CORRECTING.includes(x))).length;
 
@@ -522,10 +527,10 @@ function scopeLabel() {
 function route() {
   const [page, a, b] = (location.hash.slice(1) || "overview").split("~");
   const views = { overview: viewOverview, recs: viewRecs, rec: () => viewRec(a), corrections: viewCorrections, adoption: viewAdoption,
-    delivery: viewDelivery, sessions: viewSessions, session: () => viewSession(a, b), method: () => viewMethod(a), settings: viewSettings };
+    delivery: viewDelivery, sessions: viewSessions, session: () => viewSession(a, b), method: () => viewMethod(a), projects: viewProjects, settings: viewSettings };
   if (!has("github")) delete views.delivery;
   // Nothing imported: every page would be empty tables, so say so once.
-  const view = state.data.sessions.length || page === "settings" ? views[page] || viewOverview : () => { renderTopbar({ crumbs: [{ label: "Overview" }] }); return NOTICES.sessions(); };
+  const view = state.data.sessions.length || page === "settings" || page === "projects" ? views[page] || viewOverview : () => { renderTopbar({ crumbs: [{ label: "Overview" }] }); return NOTICES.sessions(); };
   renderNav(page === "rec" ? "recs" : page === "session" ? "sessions" : views[page] ? page : "overview");
   $("#content").innerHTML = view();
   const key = location.hash;
@@ -1294,7 +1299,7 @@ async function settingsApi(method, path, body) {
   try {
     const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-Debrief-Token": TOKEN }, body: body && JSON.stringify(body) });
     const out = await r.json();
-    return r.ok ? out : { error: out.error || `HTTP ${r.status}` };
+    return r.ok ? out : { ...out, error: out.error || `HTTP ${r.status}` };
   } catch {
     return { error: "" };
   }
@@ -1339,6 +1344,129 @@ async function settingsSend(at, method, path, body, done) {
   if (r.stages) Object.assign(state.settings, at === "key" ? { key: r.key } : r);
   state.settingsMsg = { at, text: r.stages ? done : r.error || "Could not reach debrief. Is `debrief open` still running?", bad: !r.stages };
   rerender();
+}
+
+// ---------- Projects ----------
+
+const RUN_STAGES = { ingest: "Reading logs", github: "Looking up pull requests", label: "Labeling", synthesize: "Finding patterns", recommend: "Writing ideas", export: "Building the report" };
+const VIA = { "claude-code": "your Claude subscription", openrouter: "OpenRouter, paid per use" };
+const GONE = "Could not reach debrief. Is `debrief open` still running?";
+const onProjects = () => location.hash === "#projects";
+const redraw = () => { if (onProjects()) rerender(); };
+// Screen readers hear #live; the page itself is redrawn too often to be a live region.
+const say = (text) => { $("#live").textContent = text; };
+
+function viewProjects() {
+  renderTopbar({ crumbs: [{ label: "Projects" }] });
+  const r = state.run, s = r.settings;
+  if (state.lastPage !== location.hash) projectsRefresh();  // on entering the page
+  if (!s) return '<p class="loading">Loading…</p>';
+  if (!s.stages) return notice("Projects need debrief running", `${s.error ? `${esc(s.error)}. ` : ""}This copy of the report cannot pick projects or check them. Run <code>debrief open</code> and use the page it opens.`);
+  const st = r.status || {}, running = st.state === "running", all = state.data.projects || [];
+  const picked = new Set(r.picked), nPicked = all.filter((p) => picked.has(p.path)).length;
+  const shown = all.filter((p, i) => r.showAll || i < 8 || picked.has(p.path));
+  const rows = shown.map((p) => `<tr><td><label class="check" title="${esc(p.path)}"><input type="checkbox" id="pick-${all.indexOf(p)}" data-pick="${esc(p.path)}"${picked.has(p.path) ? " checked" : ""}${running ? " disabled" : ""}> ${esc(p.name)}</label></td>
+    <td class="r">${fmt(p.sessions)}</td><td class="r">${fmt(p.turns)}</td><td class="${p.analysed_at ? "" : "muted"}">${p.analysed_at ? esc(day(p.analysed_at)) : "never"}</td></tr>`).join("");
+  const more = all.length - shown.length;
+  const e = r.est;
+  const estText = r.estimating ? "Estimating, about 20 seconds…" : !nPicked ? "" : !e ? "not estimated yet"
+    : e.error ? `the estimate failed (${esc(e.error)})`
+    : `${e.items ? `${plural(e.items, "new item")} to label` : "nothing new to label"}${!e.items || e.minutes == null ? "" : e.minutes ? ` · about ${fmt(e.minutes)} min` : " · under a minute"}${r.stale ? " · from before your last change" : ""}`;
+  const model = (id) => { const x = s.stages[id]; return x ? `<code>${esc(x.model || x.defaults[x.llm])}</code>` : "the default model"; };
+  const via = (id) => VIA[s.stages[id]?.llm] || esc(s.stages[id]?.llm || "");
+  const models = via("label") === via("synthesize") ? `Labeling uses ${model("label")} and findings use ${model("synthesize")}, through ${via("label")}.`
+    : `Labeling uses ${model("label")} through ${via("label")}; findings use ${model("synthesize")} through ${via("synthesize")}.`;
+  const why = running ? "A check is running." : r.estimating ? "Wait for the estimate to finish." : !nPicked ? "Pick at least one project first." : "";
+  const save = r.saveMsg?.bad ? `<span class="bad">${esc(r.saveMsg.text)}</span>` : `<span class="muted">${r.saves ? "Saving…" : esc(r.saveMsg?.text || "")}</span>`;
+  const log = (open) => (st.log?.length ? `<details id="run-log"${open || r.logOpen ? " open" : ""}><summary>Last lines of output</summary><pre>${esc(st.log.slice(open ? -12 : -8).join("\n"))}</pre></details>` : "");
+  const stages = Object.keys(RUN_STAGES).filter((k) => k !== "github" || s.github), at = stages.indexOf(st.stage);
+  const counted = st.total ? ` ${fmt(st.done)} of ${fmt(st.total)}` : "";
+  const box = running ? `<div class="run-row"><span><strong>Running</strong> · ${esc(RUN_STAGES[st.stage] || "Starting")}${counted}</span><button type="button" id="run-cancel">Cancel</button></div>
+      <div class="run-row"><progress id="run-bar" aria-label="Progress of the check" max="1" value="${at < 0 ? 0 : ((at + (st.total ? st.done / st.total : 0)) / stages.length).toFixed(3)}"></progress>${at < 0 ? "" : `<span class="muted">stage ${at + 1} of ${stages.length}</span>`}</div>${log(false)}`
+    : st.state === "done" ? `<p>Finished ${esc(dayTime(st.ended))}. Every page now shows the new report. <a href="#overview">Read it</a></p>${log(false)}`
+    : st.state === "failed" ? `<p class="bad">The check failed (exit code ${esc(st.exit_code)}). Its last lines:</p>${log(true)}`
+    : st.state === "cancelled" ? `<p>Cancelled. Labels made so far are saved, so the next check continues from there.</p>${log(false)}`
+    : st.error != null ? `<p class="bad">${esc(st.error || GONE)}</p>` : "";
+  return `<section class="card projects"><div class="card-body">
+    <div class="table-wrap"><table><thead><tr><th>Project</th><th class="r">Sessions</th><th class="r">Turns</th><th>Last checked</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${more > 0 ? `<p class="muted">… ${fmt(more)} more <button type="button" class="linklike" id="projects-all">show all</button></p>` : ""}
+    <div class="run-row"><span>${fmt(nPicked)} picked${estText ? ` · ${estText}` : ""} ${save}</span>
+      <button type="button" id="est-refresh"${running || r.estimating || !nPicked ? " disabled" : ""}>Refresh estimate</button></div>
+    <p class="muted">${models} <a href="#settings">Change</a></p>
+    <div class="run-row start"><button type="button" class="primary" id="run-start"${why ? ' disabled aria-describedby="run-why"' : ""}>Check my data now</button><span class="muted" id="run-why">${why}</span>${r.refused ? `<span class="bad">${esc(r.refused)}</span>` : ""}</div>
+    ${box ? `<div class="run-box">${box}</div>` : ""}
+  </div></section>`;
+}
+
+async function projectsRefresh() {
+  const r = state.run;
+  const [s, st] = await Promise.all([settingsApi("GET", "api/settings"), settingsApi("GET", "api/run")]);
+  r.settings = s;
+  if (!r.saves && s.projects) r.picked = s.projects;
+  if (s.stages) await runSeen(st); else redraw();
+}
+
+// Saves go one at a time, each sending the boxes as they are when it is sent, so two quick ticks
+// cannot overwrite each other. A refused save puts its box back.
+let saveQueue = Promise.resolve();
+function togglePick(path, on) {
+  const r = state.run, set = (yes) => { r.picked = r.picked.filter((p) => p !== path).concat(yes ? [path] : []); };
+  set(on);
+  r.saves++;
+  r.saveMsg = null;
+  saveQueue = saveQueue.then(async () => {
+    let s = await settingsApi("GET", "api/settings");
+    if (s.stages) s = await settingsApi("POST", "api/settings", { github: s.github, projects: r.picked, stages: Object.fromEntries(Object.entries(s.stages).map(([id, x]) => [id, { llm: x.llm, model: x.model }])) });
+    r.saves--;
+    if (s.stages) { r.settings = s; r.stale = Boolean(r.est); r.saveMsg = { text: "Saved." }; }
+    else { set(!on); r.saveMsg = { bad: true, text: `Not saved: ${s.error || GONE}` }; say(r.saveMsg.text); }
+    redraw();
+  });
+  redraw();
+}
+
+async function estimate() {
+  const r = state.run;
+  r.estimating = true;
+  redraw();
+  const e = await settingsApi("POST", "api/estimate");
+  Object.assign(r, { estimating: false, stale: false, est: e.error == null ? e : { error: e.lines?.length ? e.lines.slice(-3).join(" / ") : e.error || GONE } });
+  // The estimate read the logs again and rebuilt the pages.
+  if (e.error == null) await load().catch(() => {});
+  say(r.est.error ? "The estimate failed." : "Estimate ready.");
+  redraw();
+}
+
+// Every answer about the run comes through here. While it runs, ask again every 2 s, on any page,
+// so the report reloads when it ends; a hidden tab waits until it is shown again.
+let runTimer;
+async function runSeen(st) {
+  const r = state.run, was = r.status || {};
+  r.status = st;
+  clearTimeout(runTimer);
+  if (st.state === "running") {
+    runTimer = setTimeout(runPoll, 2000);
+    if (st.stage !== was.stage || was.state !== "running") say(`Running: ${RUN_STAGES[st.stage] || "starting"}.`);
+  } else if (st.state === "done" && st.ended !== r.shownRun) {
+    // Also true for a run that another tab started and that ended before this one looked.
+    r.shownRun = st.ended;
+    const ok = await load().then(() => true, () => false);
+    say(ok ? "Finished. Every page now shows the new report." : "Finished. Reload this page to see the new report.");
+  } else if (was.state === "running") {
+    say(st.state === "cancelled" ? "Cancelled. Labels made so far are saved." : st.state === "failed" ? `The check failed with exit code ${st.exit_code}.` : GONE);
+  }
+  redraw();
+}
+async function runPoll() {
+  clearTimeout(runTimer);
+  if (!document.hidden) await runSeen(await settingsApi("GET", "api/run"));
+}
+async function runSend(method) {
+  const st = await settingsApi(method, "api/run");
+  // A refusal (another tab got there first) is not news about the run: say it and look again.
+  state.run.refused = st.state ? "" : st.error || GONE;
+  if (!st.state) { say(state.run.refused); return runPoll(); }
+  await runSeen(st);
 }
 
 // ---------- global events ----------
@@ -1416,6 +1544,14 @@ function initEvents() {
     else settingsSend("save", "POST", "api/settings", { github: s.github, stages: Object.fromEntries(Object.entries(s.stages).map(([id, st]) => [id, { llm: st.llm, model: st.model }])) }, "Saved.");
   });
   document.addEventListener("click", (e) => { if (e.target.id === "key-remove") settingsSend("key", "DELETE", "api/key", undefined, "Key removed."); });
+  document.addEventListener("change", (e) => { if (e.target.dataset.pick) togglePick(e.target.dataset.pick, e.target.checked); });
+  document.addEventListener("click", (e) => {
+    const act = { "projects-all": () => { state.run.showAll = true; rerender(); }, "est-refresh": estimate, "run-start": () => runSend("POST"), "run-cancel": () => runSend("DELETE") }[e.target.id];
+    if (act && !e.target.disabled) act();
+  });
+  // toggle does not bubble, so catch it on the way down: the page is redrawn every 2 s and must keep the log open.
+  document.addEventListener("toggle", (e) => { if (e.target.id === "run-log") state.run.logOpen = e.target.open; }, true);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && state.run.status?.state === "running") runPoll(); });
   window.addEventListener("hashchange", () => {
     const deep = correctionsFromHash();
     route();
@@ -1425,15 +1561,11 @@ function initEvents() {
 
 // ---------- boot ----------
 
-async function boot() {
-  initEvents();
-  try {
-    state.data = await fetch("data/index.json").then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
-  } catch (e) {
-    $("#content").innerHTML = `<section class="card"><div class="card-body"><h2>No data</h2><p>Could not load data/index.json (${esc(e.message)}). Run <code>debrief sync</code> to build it, and open this page over http, not as a file.</p></div></section>`;
-    return;
-  }
-  const d = state.data;
+// Read the report and draw it. Called again when a check or an estimate has rebuilt it.
+async function load() {
+  const d = await fetch("data/index.json", { cache: "no-store" }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  state.data = d;
+  for (const m of [state.sessionsById, state.recsBySession, state.sessionCache, state.shardCache, state.memo]) m.clear();
   d.recommendations.sort(byReach);
   for (const s of d.sessions) state.sessionsById.set(s.id, s);
   for (const r of d.recommendations) for (const sid of r.sessions) (state.recsBySession.get(sid) || state.recsBySession.set(sid, []).get(sid)).push(r);
@@ -1442,9 +1574,7 @@ async function boot() {
   const sameName = groupBy([...byProject.keys()], (p) => pathTail(p));
   state.projects = [...byProject].map(([p, ss]) => [p, p === NO_PROJECT ? "Unknown" : pathTail(p, sameName.get(pathTail(p)).length > 1 ? 2 : 1), ss.length])
     .sort((a, b) => b[2] - a[2] || a[1].localeCompare(b[1]));
-  let saved = "";
-  try { saved = localStorage.getItem(PROJECT_KEY) || ""; } catch { /* no storage: start on all projects */ }
-  if (byProject.has(saved)) state.scope.project = saved;
+  if (!byProject.has(state.scope.project)) state.scope.project = "";
   const m = d.meta;
   const picker = state.projects.length > 1;
   $("#workspace").classList.toggle("pick", picker);
@@ -1455,7 +1585,17 @@ async function boot() {
   $("#side-foot").innerHTML = `<div class="row"><span>Sessions</span><span id="foot-sessions"></span></div>
     ${m.to ? `<div class="row"><span>Window</span><span>${esc(day(m.from))} – ${esc(day(m.to))}</span></div>` : ""}
     <div class="row"><span>Label confidence</span><span>≥ ${m.min_conf}</span></div>`;
-  correctionsFromHash();
   route();
+}
+
+async function boot() {
+  initEvents();
+  try { state.scope.project = localStorage.getItem(PROJECT_KEY) || ""; } catch { /* no storage: start on all projects */ }
+  correctionsFromHash();
+  try {
+    await load();
+  } catch (e) {
+    $("#content").innerHTML = `<section class="card"><div class="card-body"><h2>No data</h2><p>Could not load data/index.json (${esc(e.message)}). Run <code>debrief sync</code> to build it, and open this page over http, not as a file.</p></div></section>`;
+  }
 }
 boot();
