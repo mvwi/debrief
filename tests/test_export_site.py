@@ -50,3 +50,15 @@ def test_replacement_char_cannot_hide_a_secret():
 def test_replacement_char_as_the_only_word_break():
     out = redact_tree("x\ufffd" + GH)
     assert GH not in out and "[redacted]" in out
+
+
+def test_secret_split_after_its_minimum_length():
+    # The head alone is long enough to match, so a head-only redaction would leave the tail.
+    tail = "Zz9" * 14
+    for token in ("sk-proj-" + "a1B" * 9 + "\ufffd" + tail, "Bearer " + "x1" * 14 + "\ufffd" + tail):
+        out = redact_tree("key " + token + " end")
+        assert tail not in out and "[redacted]" in out and out.endswith(" end"), out
+
+
+def test_damaged_text_without_secrets_only_loses_the_mark():
+    assert redact_tree("caf\ufffd au lait, task-notification") == "caf au lait, task-notification"

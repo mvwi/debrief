@@ -69,15 +69,33 @@ def redact(text: str) -> str:
     return text
 
 
-def redact_tree(obj):
-    """Redact every string, keys included, in a JSON-like structure.
+def redact_damaged(text: str) -> str:
+    """Redact a string holding U+FFFD, which marks bytes the source could not decode, then drop it.
 
-    U+FFFD (left where the source had undecodable bytes; the artifact host rejects it) is
-    stripped between two passes. Before stripping, it is the word break that lets a pattern
-    match in "x\ufffdghp_..."; after, the halves of a secret it had split are joined.
+    The mark can sit inside a secret (so the secret only matches with the mark removed) or be
+    the only break in front of one (so it only matches with the mark kept as a break). Both
+    readings are matched against the original positions and every hit is blanked whole, so
+    no order of stripping and redacting can leave part of a secret behind.
     """
+    keep = [i for i, c in enumerate(text) if c != "\ufffd"]
+    joined = "".join(text[i] for i in keep)
+    spaced = text.replace("\ufffd", " ")
+    spans = []
+    for pattern, _ in SECRETS:
+        spans += [(keep[m.start()], keep[m.end() - 1] + 1) for m in pattern.finditer(joined) if m.end() > m.start()]
+        spans += [m.span() for m in pattern.finditer(spaced)]
+    out, at = [], 0
+    for start, end in sorted(spans):
+        if start >= at:
+            out += [text[at:start], "[redacted]"]
+        at = max(at, end)
+    return "".join([*out, text[at:]]).replace("\ufffd", "")
+
+
+def redact_tree(obj):
+    """Redact every string, keys included, in a JSON-like structure, and drop U+FFFD (the artifact host rejects it)."""
     if isinstance(obj, str):
-        return redact(redact(obj).replace("\ufffd", ""))
+        return redact_damaged(obj) if "\ufffd" in obj else redact(obj)
     if isinstance(obj, (list, tuple)):
         return [redact_tree(v) for v in obj]
     if isinstance(obj, dict):
