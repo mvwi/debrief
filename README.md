@@ -47,6 +47,10 @@ A re-run only reads logs that changed and only labels turns that are new.
 - Everything debrief writes is under `~/.local/share/debrief` (set `DEBRIEF_HOME` to move it).
 - Labeling and synthesis send transcript text to a model: by default Claude, through your own
   `claude` CLI. With `--llm openrouter` it goes to OpenRouter and needs `OPENROUTER_API_KEY`.
+- `debrief sync` asks GitHub about the pull requests your sessions produced, through your own
+  logged-in `gh` CLI and read-only. It sends repo names, PR numbers, branch names and commit
+  SHAs, and nothing from your transcripts. `--no-github`, or `[github] enabled = false` in
+  config.toml, turns it off; without `gh` it is skipped.
 - The report holds your transcripts. `debrief open` serves it on 127.0.0.1 only. Token-shaped
   strings (GitHub, Anthropic, OpenAI, AWS, Slack, Stripe, private keys and others) are replaced
   with `[redacted]` in the report, but the redaction is pattern-based: read before you share.
@@ -82,8 +86,15 @@ How they compare, measured on the prototype's data with no human-labeled set beh
 
 ## Limits in this version
 
-- GitHub PR, CI and review data load only for sessions fetched from Entire (`debrief entire`,
-  `debrief github --repo owner/name`). Local sessions get no CI or review pages.
+- A local session is linked to a pull request only when its log shows one: the URL that
+  `gh pr create` printed, or a branch it pushed that is the head of a PR. On the author's
+  machine that linked 24 of the 41 sessions that pushed. A session that pushes straight to
+  main, or whose PR was opened by hand from a branch pushed outside the session, gets no CI
+  or review data.
+- A CI failure counts for a session when its commit was made while the session ran (give or
+  take ten minutes). Review comments count for every session linked to the PR.
+- Sessions fetched from Entire still need `debrief github --repo owner/name`; `sync` does not
+  fetch their GitHub data.
 - Labels vary between runs: on a set of hard cases Haiku changed its answer on about 15% of
   rows between two identical runs.
 - Pi logs are parsed but only tested against a made-up log.
