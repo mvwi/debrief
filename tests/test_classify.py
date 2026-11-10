@@ -100,3 +100,23 @@ def test_run_claude_saves_rows_and_skips_failures(tmp_path, monkeypatch):
     assert [tuple(r) for r in rows] == [(1, "detail", "high", "m"), (1, "detail_score", "2", "m"),
                                         (1, "flag", "true", "m"), (1, "kind", "b", "m")]
     assert classify.is_cached(conn, items[0]) and not classify.is_cached(conn, items[1])
+
+
+def test_test_path_matches_common_layouts():
+    yes = ["tests/test_a.py", "pkg/foo_test.go", "src/a.test.ts", "web/a.spec.js", "e2e/login.ts", "test_a.py",
+           "src/__tests__/a.js", "spec/models/user.rb"]
+    no = ["src/latest.py", "docs/testing.md", "pkg/contest/run.go", "attest.go", "src/protest.ts"]
+    assert all(classify.TEST_PATH.search(p) for p in yes)
+    assert not any(classify.TEST_PATH.search(p) for p in no)
+
+
+def test_session_state_lists_test_files_written(tmp_path):
+    conn = classify.connect(tmp_path / "t.db")
+    sess = {"session_id": "s", "display_name": "n", "prompt": "do it"}
+    calls = {1: [{"writes": 1, "files": '["pkg/a.go", "pkg/a_test.go"]', "is_error": 0},
+                 {"writes": 0, "files": '["pkg/b_test.go"]', "is_error": 0}]}
+    state = classify.session_state(conn, sess, [], calls)
+    assert "## Test files written (1)\n- pkg/a_test.go" in state and "b_test.go" not in state
+    assert "## Test files written (0)\n(no file writes recorded" in classify.session_state(conn, sess, [], {})
+    other = {1: [{"writes": 1, "files": '["pkg/a.go"]', "is_error": 0}]}
+    assert "(none among the 1 files written)" in classify.session_state(conn, sess, [], other)
