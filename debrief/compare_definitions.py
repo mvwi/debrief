@@ -26,9 +26,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 
-from debrief import classify
+from debrief import classify, config
 
 TAIL_MARKER = "## Human message"  # turn states end with the human message; tail states don't
 
@@ -125,7 +124,7 @@ def main(argv: list[str] | None = None) -> None:
         baseline = runpy.run_path(str(Path(args.candidates).parent / "baseline.py"))["BASELINE"]
         candidates = {"baseline": baseline[args.field], **candidates}
     rows = load_labels(args.labels)
-    load_dotenv()
+    config.load_env()
     model = os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
     key = os.environ["OPENROUTER_API_KEY"]
     headers = {"Authorization": f"Bearer {key}"}

@@ -1,3 +1,6 @@
+import os
+import stat
+
 import pytest
 
 from debrief import config
@@ -7,7 +10,10 @@ from debrief import config
 def cfg(tmp_path, monkeypatch):
     path = tmp_path / "config.toml"
     monkeypatch.setattr(config, "CONFIG_PATH", path)
-    for name in set(config.ENV.values()):
+    monkeypatch.setattr(config, "ENV_PATH", tmp_path / ".env")
+    monkeypatch.setattr(config, "HOME", tmp_path)
+    monkeypatch.setattr(config, "find_dotenv", lambda: str(tmp_path / "no-such.env"))
+    for name in {*config.ENV.values(), config.KEY}:
         monkeypatch.delenv(name, raising=False)
     return path
 
@@ -45,3 +51,67 @@ def test_github_is_on_unless_the_file_says_no(cfg):
     cfg.write_text("[github]\nenabled = false\n")
     assert not config.github_enabled()
     assert config.choose("label") == ("claude-code", "claude-haiku-5-5")
+
+
+FAKE_KEY = "sk-or-v1-" + "0" * 28 + "a1b2"
+
+
+def test_save_then_load_round_trips(cfg):
+    saved = {"label": {"llm": "openrouter", "model": "typesafe/jev-1.13"}, "synthesize": {"llm": "claude-code"},
+             "github": {"enabled": False}}
+    config.save(saved)
+    assert config.load() == saved
+    assert config.choose("label") == ("openrouter", "typesafe/jev-1.13")
+    assert not config.github_enabled()
+    config.save({"github": {"enabled": True}})
+    assert config.load() == {"github": {"enabled": True}}
+
+
+@pytest.mark.parametrize("bad", [
+    {"lable": {"llm": "openrouter"}},
+    {"recommend": {"llm": "openrouter"}},
+    {"label": {"llm": ["openrouter"]}},
+    {"label": {"model": 'x"\nllm = "y'}},
+    {"label": {"model": "m" * 101}},
+    {"label": {"model": 5}},
+    {"label": "openrouter"},
+])
+def test_save_refuses_what_load_would(cfg, bad):
+    with pytest.raises(ValueError):
+        config.save(bad)
+    assert not cfg.exists()
+
+
+def test_key_file_is_private_and_keeps_other_lines(cfg):
+    config.ENV_PATH.write_text("JEV_MODEL=other/model\n")
+    os.chmod(config.ENV_PATH, 0o644)
+    config.save_key(FAKE_KEY)
+    assert stat.S_IMODE(config.ENV_PATH.stat().st_mode) == 0o600
+    assert config.ENV_PATH.read_text() == f"JEV_MODEL=other/model\nOPENROUTER_API_KEY={FAKE_KEY}\n"
+    assert config.settings()["key"] == {"set": True, "last4": "a1b2", "source": "file"}
+    assert config.settings()["stages"]["label"]["overrides"] == {"openrouter": "JEV_MODEL"}
+    config.remove_key()
+    assert config.ENV_PATH.read_text() == "JEV_MODEL=other/model\n"
+    assert config.settings()["key"]["set"] is False
+
+
+@pytest.mark.parametrize("bad", ["short", "sk-or-v1-" + "0" * 30 + "\nEVIL=1", "k" * 201, "has space " * 3, None, 5])
+def test_bad_key_is_refused(cfg, bad):
+    with pytest.raises(ValueError):
+        config.save_key(bad)
+    assert not config.ENV_PATH.exists()
+
+
+def test_environment_beats_the_key_file(cfg, monkeypatch):
+    config.save_key(FAKE_KEY)
+    monkeypatch.setenv(config.KEY, "sk-or-v1-" + "1" * 28 + "zzzz")
+    assert config.settings()["key"] == {"set": True, "last4": "zzzz", "source": "env"}
+    config.load_env()
+    assert os.environ[config.KEY].endswith("zzzz")
+
+
+def test_load_env_reads_the_key_file(cfg, monkeypatch):
+    config.save_key(FAKE_KEY)
+    monkeypatch.setattr(config, "load_dotenv", lambda path=None: path and config.os.environ.update(config.dotenv_values(path)))
+    config.load_env()
+    assert os.environ.pop(config.KEY) == FAKE_KEY

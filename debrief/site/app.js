@@ -45,6 +45,7 @@ const ICONS = {
   delivery: '<circle cx="4" cy="3.5" r="1.5"/><circle cx="4" cy="12.5" r="1.5"/><circle cx="12" cy="12.5" r="1.5"/><path d="M4 5v6M12 11V6.5a2 2 0 00-2-2H7M8.5 3L7 4.5 8.5 6"/>',
   sessions: '<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 6.5l2 1.5-2 1.5M8 9.5h3"/>',
   method: '<path d="M3 2.5h7.5a2 2 0 012 2v9H5a2 2 0 01-2-2z"/><path d="M3 11.5a2 2 0 012-2h7.5M6 5.5h4"/>',
+  settings: '<path d="M2 4.5h5M11 4.5h3M2 11.5h3M9 11.5h5"/><circle cx="9" cy="4.5" r="2"/><circle cx="7" cy="11.5" r="2"/>',
 };
 const PAGES = [
   { id: "overview", label: "Overview" },
@@ -54,6 +55,7 @@ const PAGES = [
   { id: "delivery", label: "CI & review", needs: "github" },
   { id: "sessions", label: "Sessions" },
   { id: "method", label: "How it works", secondary: true },
+  { id: "settings", label: "Settings", secondary: true },
 ];
 
 // ---------- state ----------
@@ -72,6 +74,8 @@ const state = {
   evTab: "all",
   overviewGroup: "agent",
   lastPage: null,
+  settings: null,     // what GET api/settings returned, edited in place until saved
+  settingsMsg: null,  // { at: "save" | "key", text, bad }
 };
 
 
@@ -488,10 +492,10 @@ function scopeLabel() {
 function route() {
   const [page, a, b] = (location.hash.slice(1) || "overview").split("~");
   const views = { overview: viewOverview, recs: viewRecs, rec: () => viewRec(a), corrections: viewCorrections, adoption: viewAdoption,
-    delivery: viewDelivery, sessions: viewSessions, session: () => viewSession(a, b), method: () => viewMethod(a) };
+    delivery: viewDelivery, sessions: viewSessions, session: () => viewSession(a, b), method: () => viewMethod(a), settings: viewSettings };
   if (!has("github")) delete views.delivery;
   // Nothing imported: every page would be empty tables, so say so once.
-  const view = state.data.sessions.length ? views[page] || viewOverview : () => { renderTopbar({ crumbs: [{ label: "Overview" }] }); return NOTICES.sessions(); };
+  const view = state.data.sessions.length || page === "settings" ? views[page] || viewOverview : () => { renderTopbar({ crumbs: [{ label: "Overview" }] }); return NOTICES.sessions(); };
   renderNav(page === "rec" ? "recs" : page === "session" ? "sessions" : views[page] ? page : "overview");
   $("#content").innerHTML = view();
   const key = location.hash;
@@ -1228,6 +1232,63 @@ function viewMethod(focus) {
     </div></div>`;
 }
 
+// ---------- Settings ----------
+
+const STAGE_NAMES = { label: "Label", synthesize: "Synthesize", recommend: "Recommend", verify: "Verify" };
+const LLM_NAMES = { "claude-code": "Claude Code", openrouter: "OpenRouter" };
+
+// Only `debrief open` has this API. Anything else answers with a 404 page or not at all: { error }.
+async function settingsApi(method, path, body) {
+  try {
+    const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body && JSON.stringify(body) });
+    const out = await r.json();
+    return r.ok ? out : { error: out.error || `HTTP ${r.status}` };
+  } catch {
+    return { error: "" };
+  }
+}
+
+function viewSettings() {
+  renderTopbar({ crumbs: [{ label: "Settings" }] });
+  const s = state.settings;
+  if (!s) {
+    settingsApi("GET", "api/settings").then((r) => { state.settings = r; if (location.hash === "#settings") route(); });
+    return '<p class="loading">Loading…</p>';
+  }
+  if (!s.stages) return notice("Settings need debrief running", `${s.error ? `${esc(s.error)}. ` : ""}This copy of the report cannot read or save settings. Run <code>debrief open</code> and use the page it opens.`);
+  const msg = (at) => `<span role="status" class="${state.settingsMsg?.bad ? "bad" : "muted"}">${state.settingsMsg?.at === at ? esc(state.settingsMsg.text) : ""}</span>`;
+  const rows = Object.entries(s.stages).map(([id, st]) => {
+    const llms = Object.keys(st.defaults), name = STAGE_NAMES[id] || id, over = st.overrides[st.llm];
+    return `<tr><td class="cell-title">${esc(name)}</td>
+      <td>${llms.length > 1 ? `<select data-llm="${esc(id)}" aria-label="${esc(name)} provider">${llms.map((l) => `<option value="${esc(l)}"${l === st.llm ? " selected" : ""}>${esc(LLM_NAMES[l] || l)}</option>`).join("")}</select>` : esc(LLM_NAMES[st.llm] || st.llm)}</td>
+      <td><input type="text" data-model="${esc(id)}" value="${esc(st.model)}" placeholder="${esc(st.defaults[st.llm])}" aria-label="${esc(name)} model" maxlength="100" spellcheck="false" autocomplete="off"></td>
+      <td class="muted">${over ? `Overridden by <code>$${esc(over)}</code>` : ""}</td></tr>`;
+  }).join("");
+  const k = s.key;
+  const keyState = !k.set ? "No key saved." : k.source === "env" ? `Set in your shell, ends in …${esc(k.last4)}. A key saved here would not be used.`
+    : `Saved, ends in …${esc(k.last4)} <button type="button" class="linklike" id="key-remove">Remove</button>`;
+  return `<section class="card settings"><div class="card-body">
+    <form id="settings-form">
+      <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Provider</th><th>Model</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <label class="check"><input type="checkbox" id="set-github"${s.github ? " checked" : ""}> Look up pull requests, CI and review comments for my sessions (uses the <code>gh</code> CLI)</label>
+    </form>
+    <form id="key-form" class="key-row">
+      <label for="key">OpenRouter key</label>
+      <input type="password" id="key" placeholder="paste a key" required minlength="20" maxlength="200" autocomplete="off" spellcheck="false">
+      <button>Save key</button><span>${keyState}</span>${msg("key")}
+    </form>
+    <p class="muted">Tip: Jev (provider OpenRouter) labels 2,774 items in about 3 min for about $0.37; Haiku takes 33 min.</p>
+  </div><div class="card-foot key-row"><button class="primary" form="settings-form">Save</button><span class="muted">Changes apply on the next <code>debrief sync</code>.</span>${msg("save")}</div></section>`;
+}
+
+// The key form sends only the key and takes back only the key's state, so unsaved model edits stay.
+async function settingsSend(at, method, path, body, done) {
+  const r = await settingsApi(method, path, body);
+  if (r.stages) Object.assign(state.settings, at === "key" ? { key: r.key } : r);
+  state.settingsMsg = { at, text: r.stages ? done : r.error || "Could not reach debrief. Is `debrief open` still running?", bad: !r.stages };
+  rerender();
+}
+
 // ---------- global events ----------
 
 function correctionsFromHash() {
@@ -1285,6 +1346,22 @@ function initEvents() {
     if (row && row === e.target && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); location.hash = row.dataset.href; }
   });
   document.addEventListener("input", (e) => { if (e.target.id === "rec-q") { state.recFilter.q = e.target.value; rerender(); } });
+  document.addEventListener("change", (e) => {
+    const t = e.target, stages = state.settings?.stages;
+    if (!stages || !t.closest(".settings")) return;
+    // A model belongs to its provider, so a new provider starts from its default.
+    if (t.dataset.llm) { Object.assign(stages[t.dataset.llm], { llm: t.value, model: "" }); rerender(); }
+    else if (t.dataset.model) stages[t.dataset.model].model = t.value.trim();
+    else if (t.id === "set-github") state.settings.github = t.checked;
+  });
+  document.addEventListener("submit", (e) => {
+    const s = state.settings;
+    if (!e.target.closest(".settings")) return;
+    e.preventDefault();
+    if (e.target.id === "key-form") settingsSend("key", "POST", "api/key", { key: $("#key").value.trim() }, "Key saved.");
+    else settingsSend("save", "POST", "api/settings", { github: s.github, stages: Object.fromEntries(Object.entries(s.stages).map(([id, st]) => [id, { llm: st.llm, model: st.model }])) }, "Saved.");
+  });
+  document.addEventListener("click", (e) => { if (e.target.id === "key-remove") settingsSend("key", "DELETE", "api/key", undefined, "Key removed."); });
   window.addEventListener("hashchange", () => {
     const deep = correctionsFromHash();
     route();
