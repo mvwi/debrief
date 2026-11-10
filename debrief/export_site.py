@@ -69,36 +69,23 @@ def redact(text: str) -> str:
     return text
 
 
-DAMAGED_WINDOW = 8192  # chars searched from each mark; longer than any token, bounds the work
+# A run of non-space text that holds U+FFFD and is at least this long without it is blanked whole.
+# Shorter than any token pattern above can match, so no secret touching a mark survives.
+DAMAGED_MIN = 16
+DAMAGED_RUN = re.compile(r"\S*\ufffd\S*")
 
 
 def redact_damaged(text: str) -> str:
     """Redact a string holding U+FFFD, which marks bytes the source could not decode, then drop it.
 
-    Each mark can sit inside a secret or be the only break in front of one, and a string can
-    hold both kinds. So secrets are searched with every mark removed, and again starting at
-    each place a mark stood (a start of string is a word break) with the later marks removed.
-    Hits are mapped to the original positions and blanked whole; a last plain pass covers
-    anything the joins exposed.
+    A mark can sit inside a secret, or be the only break before or after one, in any mix, so
+    no fixed way of reading the marks finds every secret. Instead any long run of text that
+    touches a mark is blanked, secret or not; damaged text is rare and not worth the risk.
     """
-    keep = [i for i, c in enumerate(text) if c != "\ufffd"]
-    if not keep:
-        return ""
-    joined = "".join(text[i] for i in keep)
-    after_mark = [p for p, i in enumerate(keep) if i and text[i - 1] == "\ufffd"]
-    hits = []  # spans in `joined`
-    for pattern, _ in SECRETS:
-        hits += [m.span() for m in pattern.finditer(joined)]
-        for p in after_mark:
-            m = pattern.match(joined[p:p + DAMAGED_WINDOW])
-            if m:
-                hits.append((p, p + m.end()))
-    out, at = [], 0
-    for start, end in sorted(h for h in hits if h[1] > h[0]):
-        if start >= at:
-            out += [joined[at:start], "[redacted]"]
-        at = max(at, end)
-    return redact("".join([*out, joined[at:]]))
+    def blank(m: re.Match) -> str:
+        rest = m.group().replace("\ufffd", "")
+        return "[redacted]" if len(rest) >= DAMAGED_MIN else rest
+    return redact(DAMAGED_RUN.sub(blank, text))
 
 
 def redact_tree(obj):

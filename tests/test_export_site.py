@@ -72,3 +72,14 @@ def test_one_mark_breaks_and_another_splits():
 
 def test_only_marks():
     assert redact_tree("\ufffd\ufffd") == ""
+
+
+def test_mark_as_the_trailing_break():
+    aws = "AKIA" + "A1B2C3D4E5F6G7H8"
+    for text in (aws + "\ufffdx", "AK\ufffdIA" + aws[4:] + "\ufffdx", "x\ufffd" + aws + "\ufffdy"):
+        assert aws[4:] not in redact_tree(text), text
+
+
+def test_damaged_private_key():
+    pem = "-----BEGIN\ufffd RSA PRIVATE KEY-----\nMII" + "a" * 30 + "\ufffd" + "b" * 30 + "\n-----END RSA PRIVATE KEY-----"
+    assert redact_tree(pem) == "[redacted]"
