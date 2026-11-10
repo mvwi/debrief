@@ -6,6 +6,8 @@ Set in DEBRIEF_HOME/config.toml, one table per stage:
     llm = "openrouter"            # or "claude-code"
     model = "typesafe/jev-1.13"   # optional; each llm has a default
 
+`[github] enabled = false` stops sync from asking GitHub about your sessions' pull requests.
+
 A flag beats an environment variable, which beats config.toml, which beats DEFAULTS.
 """
 
@@ -41,6 +43,8 @@ def load() -> dict:
     except tomllib.TOMLDecodeError as e:
         sys.exit(f"debrief: {CONFIG_PATH} is not valid TOML: {e}")
     for stage, table in cfg.items():
+        if stage == "github" and isinstance(table, dict):
+            continue
         if stage not in DEFAULTS or not isinstance(table, dict):
             sys.exit(f"debrief: {CONFIG_PATH}: unknown stage [{stage}]. Stages: {', '.join(DEFAULTS)}")
         if table.get("llm", next(iter(DEFAULTS[stage]))) not in DEFAULTS[stage]:
@@ -57,6 +61,11 @@ def choose(stage: str, llm: str | None = None, model: str | None = None) -> tupl
     cfg_model = cfg.get("model") if llm == cfg_llm else None
     model = model or os.environ.get(ENV.get((stage, llm), "")) or cfg_model or DEFAULTS[stage][llm]
     return llm, model
+
+
+def github_enabled() -> bool:
+    """False only when config.toml says `[github] enabled = false`."""
+    return load().get("github", {}).get("enabled", True) is not False
 
 
 def main(argv: list[str] | None = None) -> None:

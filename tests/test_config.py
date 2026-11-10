@@ -38,3 +38,10 @@ def test_bad_file_exits_with_a_message(cfg, text):
     cfg.write_text(text)
     with pytest.raises(SystemExit, match="config.toml"):
         config.choose("label")
+
+
+def test_github_is_on_unless_the_file_says_no(cfg):
+    assert config.github_enabled()
+    cfg.write_text("[github]\nenabled = false\n")
+    assert not config.github_enabled()
+    assert config.choose("label") == ("claude-code", "claude-haiku-5-5")
