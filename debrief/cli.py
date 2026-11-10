@@ -11,10 +11,12 @@ Everything is kept under DEBRIEF_HOME (default ~/.local/share/debrief).
 import argparse
 import contextlib
 import functools
+import hmac
 import http.server
 import importlib
 import io
 import json
+import secrets
 import sys
 import webbrowser
 
@@ -84,10 +86,13 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
 
     The only writes are config.toml and the key in DEBRIEF_HOME/.env. A write must be JSON, which
     a page on another site cannot send without a preflight this server never answers, and must
-    come from this origin when the browser names one.
+    come from this origin when the browser names one. It must also carry the token made for this
+    run, which only the link `debrief open` prints holds: another user of this machine can reach
+    the port but does not have the link.
     """
 
     MAX_BODY = 4096
+    token = secrets.token_urlsafe(16)
 
     def local(self) -> bool:
         ok = self.headers.get("Host") in self.hosts()
@@ -113,6 +118,8 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
             return
         self.close_connection = True  # a refused body is never read, so the connection cannot be reused
         length = self.headers.get("Content-Length", "0")
+        if not hmac.compare_digest(self.headers.get("X-Debrief-Token", "").encode(), self.token.encode()):
+            return self.reply(403, {"error": "to change settings, open the link `debrief open` printed"})
         if self.headers.get("Origin") not in (None, *(f"http://{h}" for h in self.hosts())):
             return self.reply(403, {"error": "wrong origin"})
         if self.headers.get_content_type() != "application/json":
@@ -175,7 +182,8 @@ def serve(argv: list[str]) -> None:
     except OSError as e:
         sys.exit(f"debrief: cannot listen on port {args.port} ({e.strerror}). Try --port.")
     url = f"http://127.0.0.1:{server.server_port}/"
-    print(f"Serving {SITE_OUT} at {url} (Ctrl-C to stop)")
+    url += f"?t={ReportHandler.token}"  # the page keeps the token for this tab and drops it from the address
+    print(f"Serving {SITE_OUT} at {url} (Ctrl-C to stop)", flush=True)
     if not args.no_browser:
         webbrowser.open(url)
     try:

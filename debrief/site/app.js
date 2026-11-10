@@ -1238,9 +1238,20 @@ const STAGE_NAMES = { label: "Label", synthesize: "Synthesize", recommend: "Reco
 const LLM_NAMES = { "claude-code": "Claude Code", openrouter: "OpenRouter" };
 
 // Only `debrief open` has this API. Anything else answers with a 404 page or not at all: { error }.
+// `debrief open` puts a token for this run in the link it opens; writes are refused without it.
+const TOKEN = (() => {
+  const url = new URL(location.href), t = url.searchParams.get("t");
+  try {
+    if (t) { sessionStorage.setItem("debrief-token", t); url.searchParams.delete("t"); history.replaceState(null, "", url); }
+    return sessionStorage.getItem("debrief-token") || "";
+  } catch {
+    return t || "";
+  }
+})();
+
 async function settingsApi(method, path, body) {
   try {
-    const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body && JSON.stringify(body) });
+    const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-Debrief-Token": TOKEN }, body: body && JSON.stringify(body) });
     const out = await r.json();
     return r.ok ? out : { error: out.error || `HTTP ${r.status}` };
   } catch {

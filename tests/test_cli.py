@@ -35,7 +35,8 @@ def test_host_header(tmp_path):
 
 
 FAKE_KEY = "sk-or-v1-" + "0" * 28 + "a1b2"
-JSON = {"Content-Type": "application/json"}
+TOKEN = {"X-Debrief-Token": ReportHandler.token}
+JSON = {"Content-Type": "application/json"} | TOKEN
 GOOD = {"stages": {"label": {"llm": "openrouter", "model": "typesafe/jev-1.13"}}, "github": False}
 
 
@@ -94,11 +95,14 @@ def test_key_goes_in_and_never_comes_out(api):
     ("POST", "/api/key", {"key": FAKE_KEY}, JSON | {"Host": "evil.example"}, 403),
     ("DELETE", "/api/key", None, JSON | {"Host": "evil.example"}, 403),
     ("POST", "/api/settings", GOOD, JSON | {"Origin": "http://evil.example"}, 403),
+    ("POST", "/api/settings", GOOD, {"Content-Type": "application/json"}, 403),  # no token
+    ("POST", "/api/key", {"key": FAKE_KEY}, JSON | {"X-Debrief-Token": "wrong"}, 403),
+    ("DELETE", "/api/key", None, JSON | {"X-Debrief-Token": "caf\u00e9"}, 403),
     ("POST", "/api/key", {"key": FAKE_KEY}, JSON | {"Origin": "null"}, 403),
     ("DELETE", "/api/key", None, JSON | {"Origin": "http://evil.example"}, 403),
-    ("POST", "/api/settings", GOOD, {"Content-Type": "text/plain"}, 415),
-    ("POST", "/api/key", {"key": FAKE_KEY}, {}, 415),
-    ("DELETE", "/api/key", None, {}, 415),
+    ("POST", "/api/settings", GOOD, JSON | {"Content-Type": "text/plain"}, 415),
+    ("POST", "/api/key", {"key": FAKE_KEY}, TOKEN, 415),
+    ("DELETE", "/api/key", None, TOKEN, 415),
     ("POST", "/api/settings", GOOD | {"pad": "x" * 5000}, JSON, 413),
     ("POST", "/api/settings", b"{not json", JSON, 400),
     ("POST", "/api/settings", [1], JSON, 400),

@@ -78,6 +78,10 @@ will use. A flag beats an environment variable, which beats the file.
 provider and model for each stage, turns the GitHub lookups on or off, and saves an OpenRouter
 key.
 
+Saving needs the link `debrief open` prints, which carries a token for that run: someone else
+on the same machine can reach the port but cannot change your settings. They can still read the
+report, as they can read the files.
+
 - Saving rewrites `config.toml`; comments you wrote in it are lost.
 - The key goes in `~/.local/share/debrief/.env`, readable only by you. The page shows its last
   four characters and never the key. `OPENROUTER_API_KEY` set in your shell wins over the saved one.
