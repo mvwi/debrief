@@ -2,7 +2,8 @@
 
     debrief sync                 ingest local logs, label turns, find patterns, build the report
     debrief sync --dry-run       ingest, then say what labeling would cost; no model calls
-    debrief open                 serve the report on localhost and open it in the browser
+    debrief open                 serve the report on localhost and open it in the browser;
+                                 the page can also start a sync, show its progress and stop it
     debrief <stage> [args]       run one stage; `debrief <stage> --help` lists its flags
 
 Everything is kept under DEBRIEF_HOME (default ~/.local/share/debrief).
@@ -18,11 +19,13 @@ import io
 import json
 import os
 import secrets
+import signal
 import sys
 import webbrowser
 
 from debrief import config
 from debrief.paths import HOME, SITE_OUT
+from debrief.runner import Runner
 
 # Stage name -> module. Each module has main(argv).
 STAGES = {
@@ -91,12 +94,13 @@ def sync(argv: list[str]) -> None:
 
 
 class ReportHandler(http.server.SimpleHTTPRequestHandler):
-    """Static files and the settings API, for requests addressed to this machine only.
+    """Static files, the settings API and the run API, for requests addressed to this machine only.
 
     A web page can point its own hostname at 127.0.0.1 (DNS rebinding) and reach this server
     through the browser; checking Host stops that, since the page cannot fake it.
 
-    The only writes are config.toml and the key in DEBRIEF_HOME/.env. A write must be JSON, which
+    The writes are config.toml, the key in DEBRIEF_HOME/.env, and starting or stopping a sync
+    (which takes nothing from the request: what to analyse comes from config). A write must be JSON, which
     a page on another site cannot send without a preflight this server never answers, and must
     come from this origin when the browser names one. It must also carry the token made for this
     run, which only the link `debrief open` prints holds: another user of this machine can reach
@@ -105,6 +109,7 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
 
     MAX_BODY = 4096
     token = secrets.token_urlsafe(16)
+    jobs = Runner(hide=(token,))
 
     def local(self) -> bool:
         ok = self.headers.get("Host") in self.hosts()
@@ -120,10 +125,10 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
         return super().send_head() if self.local() else None
 
     def do_GET(self):
-        if self.path != "/api/settings":
+        if self.path not in ("/api/settings", "/api/run"):
             super().do_GET()
         elif self.local():
-            self.reply_settings()
+            self.reply_settings() if self.path == "/api/settings" else self.reply(200, self.jobs.status())
 
     def do_POST(self):
         if not self.local():
@@ -151,6 +156,19 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
                     config.save_key(body.get("key"))
                 case "DELETE", "/api/key":
                     config.remove_key()
+                case "POST", "/api/run":
+                    if not self.jobs.start():
+                        return self.reply(409, {"error": "a run or an estimate is already going"})
+                    return self.reply(200, self.jobs.status())
+                case "DELETE", "/api/run":
+                    self.jobs.cancel()
+                    return self.reply(200, self.jobs.status())
+                case "POST", "/api/estimate":
+                    # POST, not GET: it ingests, so it writes the database and must carry the token.
+                    got = self.jobs.estimate()
+                    if got is None:
+                        return self.reply(409, {"error": "a run or an estimate is already going"})
+                    return self.reply(500 if got["exit_code"] else 200, got)
                 case _:
                     return self.reply(404, {"error": "no such endpoint"})
         except (ValueError, TypeError) as e:  # bad JSON is a ValueError
@@ -185,14 +203,19 @@ def serve(argv: list[str]) -> None:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true", help="Serve without opening a browser tab")
     args = p.parse_args(argv)
-    if not (SITE_OUT / "data" / "index.json").exists():
-        sys.exit(f"debrief: no report in {SITE_OUT}. Run `debrief sync` first.")
     handler = functools.partial(ReportHandler, directory=str(SITE_OUT))
     try:
         # Loopback only: the report holds transcripts.
         server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     except OSError as e:
         sys.exit(f"debrief: cannot listen on port {args.port} ({e.strerror}). Try --port.")
+    jobs = ReportHandler.jobs
+    jobs.stop_orphan()
+    if not (SITE_OUT / "data" / "index.json").exists():
+        print("No report yet: reading your local logs so the page has something to show (no model calls) ...", flush=True)
+        stage("ingest", [])
+        stage("export", [])
+    signal.signal(signal.SIGTERM, signal.default_int_handler)  # `kill` stops a run too, as Ctrl-C does
     url = f"http://127.0.0.1:{server.server_port}/"
     url += f"?t={ReportHandler.token}"  # the page keeps the token for this tab and drops it from the address
     print(f"Serving {SITE_OUT} at {url} (Ctrl-C to stop)", flush=True)
@@ -210,6 +233,7 @@ def serve(argv: list[str]) -> None:
         print()
     finally:
         door.unlink(missing_ok=True)
+        jobs.cancel()
 
 
 def main(argv: list[str] | None = None) -> None:
