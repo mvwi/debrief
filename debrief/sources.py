@@ -166,9 +166,10 @@ def is_headless(agent: str | None, launcher: str, human_turns: int | None, inclu
 
 
 def unload(conn, session_id: str) -> None:
-    """Remove a session's rows. A log that is not loaded must not own entries either."""
+    """Remove a session's rows. A log that is not loaded must not own entries either. Its labels
+    go too: they point at message positions, which a later reload would number afresh."""
     with conn:
-        for table in ("source_entries", "sessions", "messages", "tool_calls"):
+        for table in ("source_entries", "sessions", "messages", "tool_calls", "turn_labels", "session_labels"):
             conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
 
 

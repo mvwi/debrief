@@ -325,3 +325,16 @@ def test_a_change_to_the_rule_itself_applies_to_unchanged_logs(conn, tmp_path, m
     assert run(conn, tmp_path) == {"headless run": 2}
     monkeypatch.undo()
     assert run(conn, tmp_path) == {"loaded": 2} and session_ids(conn) == ["cli", "sdk"]
+
+
+def test_unloading_a_session_clears_its_labels(conn, tmp_path):
+    write(tmp_path / "claude/proj/sdk.jsonl", claude_entries("sdk", [("j1", "one prompt")], entrypoint="sdk-ts"))
+    write(tmp_path / "claude/proj/cli.jsonl", claude_entries("cli", [("u1", "real work")]))
+    run(conn, tmp_path, include_headless=True)
+    for sid in ("sdk", "cli"):
+        conn.execute("INSERT INTO turn_labels (session_id, msg_idx, field, value) VALUES (?, 0, 'kind', 'x')", (sid,))
+        conn.execute("INSERT INTO session_labels (session_id, field, value) VALUES (?, 'outcome', 'y')", (sid,))
+    conn.commit()
+    assert run(conn, tmp_path) == {"headless run": 1, "unchanged": 1}
+    for table in ("turn_labels", "session_labels"):
+        assert [r[0] for r in conn.execute(f"SELECT session_id FROM {table}")] == ["cli"]
