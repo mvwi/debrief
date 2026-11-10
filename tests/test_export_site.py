@@ -62,3 +62,13 @@ def test_secret_split_after_its_minimum_length():
 
 def test_damaged_text_without_secrets_only_loses_the_mark():
     assert redact_tree("caf\ufffd au lait, task-notification") == "caf au lait, task-notification"
+
+
+def test_one_mark_breaks_and_another_splits():
+    # Neither "all marks removed" nor "all marks as breaks" matches this one.
+    out = redact_tree("x\ufffd" + GH[:12] + "\ufffd" + GH[12:] + " end")
+    assert GH[12:] not in out and GH[:12] not in out and out.endswith(" end"), out
+
+
+def test_only_marks():
+    assert redact_tree("\ufffd\ufffd") == ""

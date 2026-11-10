@@ -69,27 +69,36 @@ def redact(text: str) -> str:
     return text
 
 
+DAMAGED_WINDOW = 8192  # chars searched from each mark; longer than any token, bounds the work
+
+
 def redact_damaged(text: str) -> str:
     """Redact a string holding U+FFFD, which marks bytes the source could not decode, then drop it.
 
-    The mark can sit inside a secret (so the secret only matches with the mark removed) or be
-    the only break in front of one (so it only matches with the mark kept as a break). Both
-    readings are matched against the original positions and every hit is blanked whole, so
-    no order of stripping and redacting can leave part of a secret behind.
+    Each mark can sit inside a secret or be the only break in front of one, and a string can
+    hold both kinds. So secrets are searched with every mark removed, and again starting at
+    each place a mark stood (a start of string is a word break) with the later marks removed.
+    Hits are mapped to the original positions and blanked whole; a last plain pass covers
+    anything the joins exposed.
     """
     keep = [i for i, c in enumerate(text) if c != "\ufffd"]
+    if not keep:
+        return ""
     joined = "".join(text[i] for i in keep)
-    spaced = text.replace("\ufffd", " ")
-    spans = []
+    after_mark = [p for p, i in enumerate(keep) if i and text[i - 1] == "\ufffd"]
+    hits = []  # spans in `joined`
     for pattern, _ in SECRETS:
-        spans += [(keep[m.start()], keep[m.end() - 1] + 1) for m in pattern.finditer(joined) if m.end() > m.start()]
-        spans += [m.span() for m in pattern.finditer(spaced)]
+        hits += [m.span() for m in pattern.finditer(joined)]
+        for p in after_mark:
+            m = pattern.match(joined[p:p + DAMAGED_WINDOW])
+            if m:
+                hits.append((p, p + m.end()))
     out, at = [], 0
-    for start, end in sorted(spans):
+    for start, end in sorted(h for h in hits if h[1] > h[0]):
         if start >= at:
-            out += [text[at:start], "[redacted]"]
+            out += [joined[at:start], "[redacted]"]
         at = max(at, end)
-    return "".join([*out, text[at:]]).replace("\ufffd", "")
+    return redact("".join([*out, joined[at:]]))
 
 
 def redact_tree(obj):
