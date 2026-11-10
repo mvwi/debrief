@@ -120,3 +120,18 @@ def test_session_state_lists_test_files_written(tmp_path):
     assert "## Test files written (0)\n(no file writes recorded" in classify.session_state(conn, sess, [], {})
     other = {1: [{"writes": 1, "files": '["pkg/a.go"]', "is_error": 0}]}
     assert "(none among the 1 files written)" in classify.session_state(conn, sess, [], other)
+
+
+def test_run_claude_prints_progress_without_item_text(tmp_path, monkeypatch, capsys):
+    conn = classify.connect(tmp_path / "t.db")
+    items = [item(1), item(2)]
+    for it in items:
+        it["hash"] = classify.input_hash("m", it)
+    monkeypatch.setattr(classify, "label_batch", lambda batch, model: ({0: classify.to_answers(GOOD, Q)}, 1))
+    classify.run_claude(conn, "m", items, 1)
+    out = capsys.readouterr().out
+    assert "2/2 done, 1 failed" in out and "FAIL turn_labels s 2" in out and "done: 1 ok, 1 failed" in out
+    assert "state" not in out and "item 1" not in out  # neither states nor labels, which hold transcript text
+
+    classify.run_claude(conn, "m", items, 1, verbose=True)
+    assert "ok   item 1" in capsys.readouterr().out

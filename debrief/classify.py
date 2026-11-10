@@ -49,6 +49,7 @@ PROMPT_CAP = 8_000        # opening prompt in session state
 OLD_TEXT_CAP = 400        # assistant texts older than the last two
 TAIL_TEXT_CAP = 1_500     # last assistant texts in session state
 WORKERS = 8
+PROGRESS_EVERY = 50       # Jev makes one call per item, so report progress every this many
 CLAUDE_MODEL = "claude-haiku-5-5"
 CLAUDE_WORKERS = 4        # concurrent `claude -p` calls
 BATCH_ITEMS = 10          # items per Claude call
@@ -492,6 +493,11 @@ def event_items(conn) -> tuple[list, list]:
 
 # --- Jev --------------------------------------------------------------------
 
+def ident(it: dict) -> str:
+    """An item's table and key, with none of its text: safe to print."""
+    return f"{it['table']} {' '.join(str(k) for k in it['key'])}"
+
+
 def input_hash(model: str, it: dict) -> str:
     payload = json.dumps([model, it["questions"], it["state"]], sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -654,7 +660,7 @@ def label_batch(batch: list[dict], model: str, ask=ask_claude_code) -> tuple[dic
         try:
             good[i] = to_answers(replies[i + 1], it["questions"])
         except (KeyError, TypeError, ValueError) as e:
-            print(f"  no usable answer for {it['label']}: {type(e).__name__} {e}")
+            print(f"  no usable answer for {ident(it)}: {type(e).__name__} {e}")
             bad.append(i)
     if bad and len(batch) > 1:
         mid = (len(bad) + 1) // 2
@@ -666,10 +672,10 @@ def label_batch(batch: list[dict], model: str, ask=ask_claude_code) -> tuple[dic
     return good, calls
 
 
-def run_claude(conn, model: str, items: list[dict], workers: int) -> None:
+def run_claude(conn, model: str, items: list[dict], workers: int, verbose: bool = False) -> None:
     todo = batches(items)
     print(f"classifying {len(items)} items with {model} in {len(todo)} calls, {workers} at a time")
-    started, ok, calls = time.monotonic(), 0, 0
+    started, ok, failed, calls = time.monotonic(), 0, 0, 0
     with ThreadPoolExecutor(workers) as pool:
         futures = {pool.submit(label_batch, batch, model): batch for batch in todo}
         for fut in as_completed(futures):
@@ -680,9 +686,14 @@ def run_claude(conn, model: str, items: list[dict], workers: int) -> None:
                 if i in answers:
                     save(conn, model, it, answers[i])
                     ok += 1
-                print(f"{'ok  ' if i in answers else 'FAIL'} {it['label']}")
+                else:
+                    failed += 1
+                    print(f"FAIL {ident(it)}")
+                if verbose:
+                    print(f"{'ok  ' if i in answers else 'FAIL'} {it['label']}")
+            print(f"  {ok + failed}/{len(items)} done, {failed} failed")
     minutes = (time.monotonic() - started) / 60
-    print(f"done: {ok} ok, {len(items) - ok} failed, {calls} calls, {minutes:.1f} min"
+    print(f"done: {ok} ok, {failed} failed, {calls} calls, {minutes:.1f} min"
           + (f", {ok / minutes:.0f} items/min" if ok else ""))
 
 
@@ -716,6 +727,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dry-run", action="store_true",
                         help="Print states, questions and the number of calls; call nothing")
     parser.add_argument("--force", action="store_true", help="Ignore cached labels")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print a line per item with the start of its text, not just progress")
     parser.add_argument("--limit", type=int, help="At most N items of each kind")
     parser.add_argument("--llm", choices=["openrouter", "claude-code"], default="openrouter",
                         help="openrouter: Jev, billed per call. claude-code: `claude -p` on your subscription")
@@ -755,27 +768,31 @@ def main(argv: list[str] | None = None) -> None:
         return
     items = [it for its in kinds.values() for it in its]
     if args.llm == "claude-code":
-        run_claude(conn, model, items, args.parallel)
+        run_claude(conn, model, items, args.parallel, args.verbose)
         return
     if not key:
         raise SystemExit("OPENROUTER_API_KEY is empty in .env; use --dry-run, --llm claude-code, or set it.")
 
     print(f"classifying {len(items)} items with {model}")
-    cost, failed = 0.0, 0
+    cost, failed, done = 0.0, 0, 0
     headers = {"Authorization": f"Bearer {key}", "X-OpenRouter-Title": "debrief"}
     with httpx.Client(headers=headers, timeout=120) as client, ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(decide, client, model, it): it for it in items}
         for fut in as_completed(futures):
             it = futures[fut]
+            done += 1
             try:
                 resp = fut.result()
             except Exception as e:  # noqa: BLE001 - report and keep going
                 failed += 1
-                print(f"FAIL {it['label']}: {e}")
-                continue
-            save(conn, model, it, resp["answers"])
-            cost += (resp.get("usage") or {}).get("cost") or 0
-            print(f"ok   {it['label']}")
+                print(f"FAIL {ident(it)}: {e}")
+            else:
+                save(conn, model, it, resp["answers"])
+                cost += (resp.get("usage") or {}).get("cost") or 0
+                if args.verbose:
+                    print(f"ok   {it['label']}")
+            if done % PROGRESS_EVERY == 0 or done == len(items):
+                print(f"  {done}/{len(items)} done, {failed} failed")
     print(f"done: {len(items) - failed} ok, {failed} failed, cost ${cost:.4f}")
 
 
