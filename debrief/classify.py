@@ -122,7 +122,7 @@ TURN_QUESTIONS = {
         "Is the human surfacing information the agent had access to but did not find or check itself?",
         "The human states, rather than asks, something the agent could already reach with its own "
         "tools: code behavior, file contents or locations, test or command results, merge conflicts, "
-        "git, PR, CI or trail state (a PR is merged, a finding is open), review findings about the "
+        "git, PR, CI or review state (a PR is merged, a finding is open), review findings about the "
         "branch, or that a spec, doc or endpoint exists. A hunch stated as fact counts, and so does a "
         "rhetorical question that points at such a source.",
         "Anything else, including: real questions, even ones naming files or lines; instructions, "
@@ -141,8 +141,8 @@ TURN_QUESTIONS = {
         "fix; output from running the agent's script that shows an error or unwanted line; 'why is it "
         "duplicated?' above the command's output; 'this seems worse' about output the agent just changed; "
         "'you dropped all the no-error assertions'; 'remove the package-lock, I think the merge added that?'.",
-        "Anything else, including: findings relayed from bots, trails, CI, Copilot, Codex or other "
-        "reviewers, with or without a header ('[P2] …', 'Entire Trail review comment', 'address the trail "
+        "Anything else, including: findings relayed from review bots, CI, Copilot, Codex or other "
+        "reviewers, with or without a header ('[P2] …', 'review comment from <bot>', 'address the review "
         "findings', 'ci is failing'), and numbered or formal write-ups that cite file:line, describe impact "
         "and suggest a fix, which read as pasted reviews; merge or rebase conflicts; new requests or "
         "tickets; problems in code or services the agent did not change, or behavior that predates its "
@@ -455,9 +455,9 @@ def event_items(conn) -> tuple[list, list]:
                             REVIEW_QUESTIONS, f"comment {c['comment_id']} {one_line(c['body'], 50)}"))
     checks = []
     for c in conn.execute(
-        # Skip the Entire approval gate and the 'test' rollup job, which only echoes other jobs.
+        # Skip the Entire app's approval gate: it fails until a human approves, not because of the code.
         "SELECT * FROM gh_checks WHERE conclusion IN ('failure', 'timed_out') AND failure_log IS NOT NULL "
-        "AND coalesce(app, '') != 'entire' AND name != 'test' ORDER BY check_id"
+        "AND coalesce(app, '') != 'entire' ORDER BY check_id"
     ):
         head = f"## CI check: {c['name']} ({c['conclusion']})\n\n## Failure log (tail)\n"
         state = head + (c["failure_log"] or "")[-(STATE_CAP - len(head)):]
@@ -738,7 +738,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"classifying {len(items)} items with {model}")
     cost, failed = 0.0, 0
-    headers = {"Authorization": f"Bearer {key}", "X-OpenRouter-Title": "entire-insights"}
+    headers = {"Authorization": f"Bearer {key}", "X-OpenRouter-Title": "debrief"}
     with httpx.Client(headers=headers, timeout=120) as client, ThreadPoolExecutor(WORKERS) as pool:
         futures = {pool.submit(decide, client, model, it): it for it in items}
         for fut in as_completed(futures):
