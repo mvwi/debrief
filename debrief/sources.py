@@ -12,8 +12,10 @@ sessions' rows.
 Left out on purpose, and counted in the summary:
   sub-agent logs   Claude Code keeps each sub-agent's turns in its own file. No person
                    typed them, and the parent session already records the call and its result.
-  headless runs    `claude -p` and `codex exec`. debrief's own model calls are such runs,
-                   and must not come back in as sessions. --include-headless loads them.
+  headless runs    `claude -p` and `codex exec`: debrief's own model calls are such runs,
+                   and must not come back in as sessions. Also sessions a program started
+                   through the Claude SDK that have fewer than two human turns.
+                   --include-headless loads them all.
   no human turn    empty files, metadata-only files, and copies with nothing new in them.
   copied entries   a resumed or forked session's log starts with a copy of the earlier
                    log. Each entry loads into one session only, so no turn counts twice.
@@ -35,9 +37,11 @@ from debrief.normalize import PARSERS, read_jsonl, safe_session_id, write_log
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 CODEX_DIR = Path.home() / ".codex" / "sessions"
 # How the agent was started, as its log records it. `claude -p` logs entrypoint "sdk-cli";
-# `codex exec` logs source "exec". SDK-driven apps ("sdk-ts", "sdk-py") are not in this set:
-# on the machine this was built on, they include sessions a person drove through a wrapper app.
+# `codex exec` logs source "exec". Other "sdk-*" entrypoints are programs driving Claude Code:
+# mostly one-prompt jobs, but also wrapper apps a person talks through. Those count as
+# headless only below SDK_MIN_TURNS human turns.
 HEADLESS_CLAUDE = {"sdk-cli"}
+SDK_MIN_TURNS = 2
 HEADLESS_CODEX = {"exec"}
 GITDIR = re.compile(r"gitdir: (.+?)/\.git/worktrees/")
 
@@ -83,11 +87,12 @@ def most_common(values: list) -> str | None:
 
 def facts(agent: str, entries: list[dict], stem: str) -> dict:
     """What the log says about its session: id, cwd, headless, model, title, tokens in and out."""
-    f = {"id": stem, "cwd": "", "headless": False, "model": None, "title": None, "in": None, "out": None}
+    f = {"id": stem, "cwd": "", "headless": False, "sdk": False, "model": None, "title": None, "in": None, "out": None}
     if agent == "Claude Code":
         f["cwd"] = next((e["cwd"] for e in entries if e.get("cwd")), "")
         entrypoints = {e["entrypoint"] for e in entries if e.get("entrypoint")}
         f["headless"] = bool(entrypoints) and entrypoints <= HEADLESS_CLAUDE
+        f["sdk"] = bool(entrypoints) and all(e.startswith("sdk-") for e in entrypoints)
         for kind, field in (("ai-title", "aiTitle"), ("custom-title", "customTitle")):  # a custom title wins
             f["title"] = next((e[field] for e in reversed(entries) if e.get("type") == kind and e.get(field)), f["title"])
         replies = [e["message"] for e in entries if e.get("type") == "assistant" and not e.get("isSidechain")
@@ -188,12 +193,15 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
     foreign = {r[0] for r in conn.execute(FOREIGN, (session_id,))}
     kept = [e for k, e in zip(keys, entries) if k not in foreign]
     log = PARSERS[agent](kept)
-    prompt = next((m["text"] for m in log.messages if m["user_kind"] == "human"), None)
-    if prompt is None:
+    prompts = [m["text"] for m in log.messages if m["user_kind"] == "human"]
+    # Judged on every read, so a one-turn SDK session that gains a second turn loads on the next run.
+    few_turns = f["sdk"] and not include_headless and len(prompts) < SDK_MIN_TURNS
+    if not prompts or few_turns:
         with conn:  # a log that is not loaded must not own entries, nor keep rows from an earlier load
             for table in ("source_entries", "sessions", "messages", "tool_calls"):
                 conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
-        return done("no human turn")
+        return done("headless run" if prompts else "no human turn")
+    prompt = prompts[0]
     f = facts(agent, kept, path.stem) | {"id": session_id, "cwd": f["cwd"]}
     stamps = [e["timestamp"] for e in kept if isinstance(e.get("timestamp"), str)]
     lines = prompt.strip().splitlines()
@@ -263,7 +271,7 @@ def main(argv: list[str] | None = None) -> None:
                         help="Also load .jsonl logs from this folder; repeat for more")
     parser.add_argument("--project", metavar="DIR", help="Only sessions run in this directory or below it")
     parser.add_argument("--since", metavar="YYYY-MM-DD", help="Only logs modified on or after this date")
-    parser.add_argument("--include-headless", action="store_true", help="Also load `claude -p` and `codex exec` runs")
+    parser.add_argument("--include-headless", action="store_true", help="Also load `claude -p`, `codex exec` and one-turn SDK runs")
     args = parser.parse_args(argv)
 
     counts = sync(db.connect(), args.claude_dir, args.codex_dir, args.import_dirs, args.project, args.since,

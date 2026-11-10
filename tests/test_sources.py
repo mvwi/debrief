@@ -112,6 +112,27 @@ def test_headless_runs_are_skipped_unless_asked_for(conn, tmp_path):
     assert run(conn, tmp_path, include_headless=True) == {"loaded": 2, "unchanged": 1}
 
 
+def test_sdk_sessions_load_only_with_two_human_turns(conn, tmp_path):
+    job = write(tmp_path / "claude/proj/job.jsonl", claude_entries("job", [("j1", "blame this CI failure")], entrypoint="sdk-ts"))
+    write(tmp_path / "claude/proj/chat.jsonl", claude_entries("chat", [("c1", "hello"), ("c2", "go on")], entrypoint="sdk-py"))
+    # Resumed from a terminal: not every entrypoint is the SDK, so it is a person's session.
+    write(tmp_path / "claude/proj/mixed.jsonl", [*claude_entries("mixed", [("m1", "one turn")], entrypoint="sdk-ts"),
+                                               {"type": "mode", "sessionId": "mixed", "entrypoint": "cli"}])
+    assert run(conn, tmp_path) == {"headless run": 1, "loaded": 2}
+    assert [s for s, _ in human_turns(conn)] == ["chat", "chat", "mixed"]
+
+    # The job was a conversation still on its first turn: the second turn brings it in.
+    write(job, claude_entries("job", [("j1", "blame this CI failure"), ("j2", "and the fix?")], entrypoint="sdk-ts"))
+    assert run(conn, tmp_path) == {"loaded": 1, "unchanged": 2}
+    assert [s for s, _ in human_turns(conn)].count("job") == 2
+
+
+def test_include_headless_loads_one_turn_sdk_sessions(conn, tmp_path):
+    write(tmp_path / "claude/proj/job.jsonl", claude_entries("job", [("j1", "review this diff")], entrypoint="sdk-ts"))
+    assert run(conn, tmp_path) == {"headless run": 1}
+    assert run(conn, tmp_path, include_headless=True) == {"loaded": 1}
+
+
 @pytest.mark.parametrize("order", [("orig", "resumed", "zfork"), ("zfork", "resumed", "orig"), ("resumed", "orig", "zfork")])
 def test_copied_history_loads_once_whatever_the_order(conn, tmp_path, order):
     """A resumed log keeps the copied entries' session ID, so the original owns them. A forked one
