@@ -89,13 +89,12 @@ def most_common(values: list) -> str | None:
 
 
 def facts(agent: str, entries: list[dict], stem: str) -> dict:
-    """What the log says about its session: id, cwd, headless, model, title, tokens in and out."""
-    f = {"id": stem, "cwd": "", "headless": False, "wrapped": False, "model": None, "title": None, "in": None, "out": None}
+    """What the log says about its session: id, cwd, launcher (as logged; see is_headless),
+    model, title, tokens in and out."""
+    f = {"id": stem, "cwd": "", "launcher": "", "model": None, "title": None, "in": None, "out": None}
     if agent == "Claude Code":
         f["cwd"] = next((e["cwd"] for e in entries if e.get("cwd")), "")
-        entrypoints = {e["entrypoint"] for e in entries if e.get("entrypoint")}
-        f["headless"] = bool(entrypoints) and entrypoints <= HEADLESS_CLAUDE
-        f["wrapped"] = bool(entrypoints) and all(e.startswith("sdk-") for e in entrypoints)
+        f["launcher"] = ",".join(sorted({str(e["entrypoint"]) for e in entries if e.get("entrypoint")}))
         for kind, field in (("ai-title", "aiTitle"), ("custom-title", "customTitle")):  # a custom title wins
             f["title"] = next((e[field] for e in reversed(entries) if e.get("type") == kind and e.get(field)), f["title"])
         replies = [e["message"] for e in entries if e.get("type") == "assistant" and not e.get("isSidechain")
@@ -111,8 +110,7 @@ def facts(agent: str, entries: list[dict], stem: str) -> dict:
         payloads = [(e.get("type"), e["payload"]) for e in entries if isinstance(e.get("payload"), dict)]
         meta = next((p for t, p in payloads if t == "session_meta"), {})
         f["id"], f["cwd"] = meta.get("id") or stem, meta.get("cwd") or ""
-        f["headless"] = meta.get("source") in HEADLESS_CODEX
-        f["wrapped"] = bool(meta.get("originator")) and not str(meta["originator"]).lower().startswith("codex")
+        f["launcher"] = f"{meta.get('originator') or ''}|{meta.get('source') or ''}"
         f["model"] = most_common([p["model"] for t, p in payloads if t == "turn_context" and p.get("model")])
         totals = [p["info"]["total_token_usage"] for t, p in payloads if p.get("type") == "token_count"
                   and isinstance(p.get("info"), dict) and isinstance(p["info"].get("total_token_usage"), dict)]
@@ -149,6 +147,31 @@ def repo_roots(cwd: str) -> tuple[str, str]:
     return cwd, cwd
 
 
+def is_headless(agent: str | None, launcher: str, human_turns: int | None, include_headless: bool) -> bool:
+    """The headless rule. It reads only what source_logs stores (the launcher as the log gives
+    it, and the turn count), so a change to the rule or to --include-headless can be applied
+    to a log that has not changed without reading it. human_turns None means not parsed yet."""
+    always = wrapped = False
+    if agent == "Claude Code":  # launcher: the log's entrypoints, comma-separated
+        entrypoints = set(filter(None, launcher.split(",")))
+        always = bool(entrypoints) and entrypoints <= HEADLESS_CLAUDE
+        wrapped = bool(entrypoints) and all(e.startswith("sdk-") for e in entrypoints)
+    elif agent == "Codex":  # launcher: "originator|source"
+        originator, _, source = launcher.partition("|")
+        always = source in HEADLESS_CODEX
+        wrapped = bool(originator) and not originator.lower().startswith("codex")
+    if include_headless:
+        return False
+    return always or (wrapped and human_turns is not None and human_turns < SDK_MIN_TURNS)
+
+
+def unload(conn, session_id: str) -> None:
+    """Remove a session's rows. A log that is not loaded must not own entries either."""
+    with conn:
+        for table in ("source_entries", "sessions", "messages", "tool_calls"):
+            conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
+
+
 def in_project(project: str | None, *dirs: str) -> bool:
     if not project:
         return True
@@ -157,18 +180,21 @@ def in_project(project: str | None, *dirs: str) -> bool:
 
 
 def load_log(conn, path: Path, agent: str | None = None, project: str | None = None,
-             include_headless: bool = True) -> str:
+             include_headless: bool = False) -> str:
     """Load one log file and record it in source_logs. Returns its status: "loaded", or why not."""
     stat = path.stat()
     entries = [e for e in read_jsonl(path, tolerant=True) if isinstance(e, dict)]
     agent = agent or sniff(entries)
-    f = facts(agent, entries, path.stem) if agent else {"id": None, "cwd": ""}
+    f = facts(agent, entries, path.stem) if agent else {"id": None, "cwd": "", "launcher": ""}
     session_id, (checkout, repo) = f["id"], repo_roots(f["cwd"])
 
-    def done(status: str, dropped: int = 0) -> str:
+    def done(status: str, dropped: int = 0, human_turns: int | None = None) -> str:
         with conn:
-            conn.execute("INSERT OR REPLACE INTO source_logs VALUES (?,?,?,?,?,?,?,?)",
-                         (str(path), session_id, agent, stat.st_size, stat.st_mtime_ns, status, f["cwd"], dropped))
+            conn.execute(
+                "INSERT OR REPLACE INTO source_logs (path, session_id, agent, size, mtime, status, cwd, dropped,"
+                " launcher, human_turns) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (str(path), session_id, agent, stat.st_size, stat.st_mtime_ns, status, f["cwd"], dropped,
+                 f["launcher"], human_turns))
         return status
 
     turns = [e for e in entries if e.get("type") in ("user", "assistant")]
@@ -178,8 +204,8 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
         return done("sub-agent log")
     if not safe_session_id(session_id):
         return done("unsafe session ID")
-    if f["headless"] and not include_headless:
-        return done("headless run")
+    if is_headless(agent, f["launcher"], None, include_headless):
+        return done("headless run")  # known from the launcher alone, so not parsed
     if not in_project(project, f["cwd"], repo):
         return done("outside --project")
     # The same session ID in two files (a session moved between project folders): the bigger file wins.
@@ -199,14 +225,11 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
     log = PARSERS[agent](kept)
     prompts = [m["text"] for m in log.messages if m["user_kind"] == "human"]
     # Judged on every read, so a one-turn wrapped session that gains a second turn loads on the next run.
-    few_turns = f["wrapped"] and not include_headless and len(prompts) < SDK_MIN_TURNS
-    if not prompts or few_turns:
-        with conn:  # a log that is not loaded must not own entries, nor keep rows from an earlier load
-            for table in ("source_entries", "sessions", "messages", "tool_calls"):
-                conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
-        return done("headless run" if prompts else "no human turn")
+    if not prompts or is_headless(agent, f["launcher"], len(prompts), include_headless):
+        unload(conn, session_id)  # it may hold rows from an earlier load
+        return done("headless run" if prompts else "no human turn", human_turns=len(prompts))
     prompt = prompts[0]
-    f = facts(agent, kept, path.stem) | {"id": session_id, "cwd": f["cwd"]}
+    f = facts(agent, kept, path.stem) | {"id": session_id, "cwd": f["cwd"], "launcher": f["launcher"]}
     stamps = [e["timestamp"] for e in kept if isinstance(e.get("timestamp"), str)]
     lines = prompt.strip().splitlines()
     write_log(conn, (
@@ -216,7 +239,7 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
     with conn:
         conn.execute("UPDATE source_logs SET status = 'duplicate file' WHERE session_id = ? AND path != ?",
                      (session_id, str(path)))
-    return done("loaded", len(foreign))
+    return done("loaded", len(foreign), len(prompts))
 
 
 def find_logs(claude_dir: Path | None, codex_dir: Path | None, import_dirs: list[Path]) -> list[tuple[Path, str | None]]:
@@ -243,9 +266,19 @@ def sync(conn, claude_dir: Path | None = CLAUDE_DIR, codex_dir: Path | None = CO
                 counts["older than --since"] += 1
                 continue
             old = known.get(str(path))
-            if old and (old["size"], old["mtime"]) == (stat.st_size, stat.st_mtime_ns):
-                # Unchanged. Read it again only if a filter that kept it out no longer does.
-                retry = (old["status"] == "headless run" and include_headless) or (
+            # A row from before the launcher column existed says too little: read that log once more.
+            if old and old["launcher"] is not None and (old["size"], old["mtime"]) == (stat.st_size, stat.st_mtime_ns):
+                # Unchanged, so not read; but the rule and flags apply afresh to what the row records.
+                headless = is_headless(old["agent"], old["launcher"], old["human_turns"], include_headless)
+                if old["status"] == "loaded" and headless:
+                    unload(conn, old["session_id"])
+                    with conn:
+                        conn.execute("UPDATE source_logs SET status = 'headless run' WHERE path = ?", (str(path),))
+                    counts["headless run"] += 1
+                    changed = True  # sessions holding copies of its entries now own them
+                    continue
+                # Read it again only if what kept it out no longer does.
+                retry = (old["status"] == "headless run" and not headless) or (
                     old["status"] == "outside --project" and in_project(project, old["cwd"], repo_roots(old["cwd"])[1]))
                 if not retry:
                     counts["unchanged" if old["status"] == "loaded" else old["status"]] += 1
@@ -262,7 +295,7 @@ def sync(conn, claude_dir: Path | None = CLAUDE_DIR, codex_dir: Path | None = CO
         if not stale:
             break
         for r in stale:
-            load_log(conn, Path(r["path"]), r["agent"])
+            load_log(conn, Path(r["path"]), r["agent"], include_headless=include_headless)
         counts["reloaded without copied entries"] += len(stale)
     return counts
 
