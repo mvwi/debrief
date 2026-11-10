@@ -16,6 +16,7 @@ import http.server
 import importlib
 import io
 import json
+import os
 import secrets
 import sys
 import webbrowser
@@ -184,12 +185,20 @@ def serve(argv: list[str]) -> None:
     url = f"http://127.0.0.1:{server.server_port}/"
     url += f"?t={ReportHandler.token}"  # the page keeps the token for this tab and drops it from the address
     print(f"Serving {SITE_OUT} at {url} (Ctrl-C to stop)", flush=True)
-    if not args.no_browser:
-        webbrowser.open(url)
+    # The browser is started with its address as a command-line argument, which other users can
+    # see in the process list. So it is given a file only this user can read, which sends it on.
+    door = HOME / "open.html"
     try:
+        if not args.no_browser:
+            door.unlink(missing_ok=True)
+            with os.fdopen(os.open(door, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+                f.write(f'<!doctype html><meta http-equiv="refresh" content="0; url={url}">')
+            webbrowser.open(door.as_uri())
         server.serve_forever()
     except KeyboardInterrupt:
         print()
+    finally:
+        door.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> None:
