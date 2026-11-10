@@ -211,6 +211,14 @@ CREATE TABLE IF NOT EXISTS findings (
     suggested_fix TEXT,
     evidence      TEXT,              -- JSON array of {session_id, msg_idx} or {event_type, event_id}
     created_at    TEXT
+    -- project (added below): the folder the finding is about; NULL when it is about all picked projects
+);
+
+-- When synthesize last finished each project's pass (it may have found nothing).
+CREATE TABLE IF NOT EXISTS project_runs (
+    project     TEXT PRIMARY KEY,    -- as in findings.project
+    run_id      TEXT,
+    analysed_at TEXT
 );
 
 -- Findings from one run merged by the lever that fixes them (recommend.py).
@@ -255,6 +263,9 @@ ADDED_COLUMNS = [
     ("gh_review_comments", "review_state", "TEXT"),  # APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED; review rows only
     ("gh_review_comments", "is_resolved", "INTEGER"),  # thread resolved; inline rows only
     ("gh_review_comments", "is_outdated", "INTEGER"),  # thread's code has since changed; inline rows only
+    # The project (see session_projects) a finding or idea is about; NULL when it is about all of them, and in old runs.
+    ("findings", "project", "TEXT"),
+    ("recommendations", "project", "TEXT"),
 ]
 
 
@@ -282,6 +293,30 @@ def add_repo(conn: sqlite3.Connection) -> None:
         for table in ("gh_checks", "gh_review_comments"):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN repo TEXT")
             conn.execute(f"UPDATE {table} SET repo = ?", (repo,))
+
+
+def repo_projects(conn: sqlite3.Connection) -> dict[str, str]:
+    """Each GitHub repo's project: the folder most of the sessions linked to its PRs ran in."""
+    rows = conn.execute("""
+        SELECT l.repo, s.cwd FROM main.sessions s JOIN session_pr_links l USING (session_id)
+        WHERE s.cwd IS NOT NULL GROUP BY l.repo, s.cwd ORDER BY COUNT(DISTINCT l.session_id), s.cwd DESC""")
+    return {repo: cwd for repo, cwd in rows}  # the last row per repo has the most sessions
+
+
+def session_projects(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """session_id -> project, for every stage. A project is the folder the session ran in.
+
+    A session with a PR in a repo whose project is another folder belongs to that project,
+    unless its own folder is some repo's project: a worktree that ingest did not resolve
+    still lands in its repo this way.
+    """
+    repos = repo_projects(conn)
+    out = dict(conn.execute("SELECT session_id, cwd FROM main.sessions"))
+    homes = set(repos.values())
+    for sid, repo in conn.execute("SELECT session_id, repo FROM session_pr_links ORDER BY repo DESC"):
+        if out.get(sid) not in homes and repo in repos:
+            out[sid] = repos[repo]
+    return out
 
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:

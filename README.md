@@ -22,13 +22,23 @@ your Claude subscription).
 
 Useful flags for `sync`:
 
-    --project DIR        only sessions run in this directory or below it
+    --project DIR        add this project to the ones sync analyses
     --since YYYY-MM-DD   only logs and evidence from this date on
     --import DIR         also load a folder of JSONL logs (Claude Code, Codex or Pi format)
     --include-headless   also load scripted runs (see below)
     --llm openrouter     label and synthesize through OpenRouter, whatever config.toml says
 
 A re-run only reads logs that changed and only labels turns that are new.
+
+You pick which projects get analysed. A project is the folder a session ran in. The first
+`debrief sync` reads your logs, lists the projects it found with their size, and stops:
+
+    debrief sync --project ~/Dev/myrepo    # pick it (kept in config.toml), then analyse
+
+Only picked projects are labeled, analysed and shown. Each gets its own findings and ideas,
+and an idea names the project it lands in (`myrepo: CLAUDE.md`). The picker in the report's
+side bar scopes every page to one project. Findings about how you prompt come from the picked
+projects together. To drop a project, remove it from `[projects] include` in config.toml.
 
 `debrief <stage> --help` runs one stage on its own: `ingest`, `label`, `synthesize`,
 `recommend`, `verify`, `export`, `prune`.
@@ -129,6 +139,12 @@ How they compare, measured on the prototype's data with no human-labeled set beh
   take ten minutes). Review comments count for every session linked to the PR.
 - Sessions fetched from Entire still need `debrief github --repo owner/name`; `sync` does not
   fetch their GitHub data.
+- A session's project is the folder it ran in, or the project of the repo it opened a PR in.
+  A session run in a worktree that ingest did not trace to its repo, and that opened no PR,
+  shows up as a project of its own, named after the worktree folder.
+- `sync` still asks GitHub about the pull requests of every session, picked or not.
+- A picked project that has not been synced yet shows in the report with no labels.
+- "How it works" describes the whole run; the project picker does not scope its numbers.
 - Labels vary between runs: on a set of hard cases Haiku changed its answer on about 15% of
   rows between two identical runs.
 - Pi logs are parsed but only tested against a made-up log.

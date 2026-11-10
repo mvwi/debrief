@@ -1,6 +1,7 @@
 """debrief: review your coding-agent sessions and see what to change.
 
     debrief sync                 ingest local logs, label turns, find patterns, build the report
+    debrief sync --project DIR   pick a project to analyse (kept in config.toml), then sync
     debrief sync --dry-run       ingest, then say what labeling would cost; no model calls
     debrief open                 serve the report on localhost and open it in the browser;
                                  the page can also start a sync, show its progress and stop it
@@ -50,7 +51,8 @@ def stage(name: str, argv: list[str]) -> None:
 
 def sync(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="debrief sync", description="Ingest local logs and rebuild the report.")
-    p.add_argument("--project", metavar="DIR", help="Only sessions run in this directory or below it")
+    p.add_argument("--project", metavar="DIR", action="append", default=[],
+                   help="Add this project to the ones sync analyses (repeatable; kept in config.toml)")
     p.add_argument("--since", metavar="YYYY-MM-DD", help="Only logs and evidence from this date on")
     p.add_argument("--import", dest="import_dirs", action="append", default=[], metavar="DIR",
                    help="Also load a folder of JSONL logs (repeatable)")
@@ -63,13 +65,15 @@ def sync(argv: list[str]) -> None:
                    help="Ingest, then print what labeling would cost; no model calls, no GitHub requests")
     args = p.parse_args(argv)
 
-    ingest = [f"--{k}={v}" for k, v in (("project", args.project), ("since", args.since)) if v]
+    # Ingest reads every log: it is local, and it is what tells you which projects there are.
+    ingest = [f"--since={args.since}"] if args.since else []
     ingest += [f"--import={d}" for d in args.import_dirs] + ["--include-headless"] * args.include_headless
     since = [f"--since={args.since}"] if args.since else []
     llm = [f"--llm={args.llm}"] if args.llm else []
 
     stage("ingest", ingest)
-    from debrief import config  # here, not at the top: the rest of this file is being edited elsewhere
+    if not pick_projects(args.project):
+        return
     off = "--no-github" if args.no_github else None if config.github_enabled() else "[github] enabled = false in config.toml"
     if off:
         print(f"\ngithub: skipped, {off}")
@@ -91,6 +95,31 @@ def sync(argv: list[str]) -> None:
     stage("recommend", [])
     stage("export", since)
     print("\nDone. Run `debrief open` to read the report.")
+
+
+def pick_projects(dirs: list[str]) -> bool:
+    """Add dirs to the picked projects. False, after printing the projects, when none is picked
+    or a dir is not a project: sync then stops before any model call."""
+    from debrief.db import connect
+    from debrief.export_site import projects_section
+
+    rows = projects_section(connect(), set(config.projects()))
+    known = {r["path"] for r in rows}
+    wanted = [os.path.abspath(os.path.expanduser(d)) for d in dirs]
+    unknown = [d for d in wanted if d not in known]
+    if not unknown:
+        for d in wanted:
+            config.pick(d)
+        if any(p in known for p in config.projects()):
+            return True
+    print(f"\n{'no sessions ran in ' + ', '.join(unknown) if unknown else 'No project is picked, so nothing was analysed'}. "
+          f"Projects found:\n")
+    print(f"  {'sessions':>8} {'messages':>8}  project")
+    for r in rows:
+        print(f"  {r['sessions']:>8} {r['turns']:>8}  {r['path']}{'  (picked)' if r['picked'] else ''}")
+    print("\nPick one with `debrief sync --project DIR` (repeat the flag for more). "
+          "Picks are kept in config.toml under [projects].")
+    return False
 
 
 class ReportHandler(http.server.SimpleHTTPRequestHandler):
@@ -151,7 +180,9 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
                 case "POST", "/api/settings":
                     if not isinstance(body.get("stages"), dict) or not isinstance(body.get("github"), bool):
                         raise TypeError("expected {stages: {...}, github: true or false}")
-                    config.save({**body["stages"], "github": {"enabled": body["github"]}})
+                    # The page that does not send the picked projects keeps them.
+                    config.save({**body["stages"], "github": {"enabled": body["github"]},
+                                 "projects": {"include": body.get("projects", config.projects())}})
                 case "POST", "/api/key":
                     config.save_key(body.get("key"))
                 case "DELETE", "/api/key":

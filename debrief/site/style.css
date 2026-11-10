@@ -171,6 +171,10 @@ pre { font-family: var(--mono); font-size: 12px; line-height: 1.5; background: v
 .logo:hover { text-decoration: none; }
 .logo-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--text-default); display: grid; place-items: center; color: var(--surface-floating); }
 .workspace { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 8px; border-radius: 8px; background: var(--surface-floating); box-shadow: 0 0 0 1px var(--frame), var(--shadow-card); font: 12px var(--mono); color: var(--text-muted); }
+.workspace.pick { padding: 0; background: none; box-shadow: none; }
+.workspace.pick select { width: 100%; min-width: 0; font: 12px var(--mono); text-overflow: ellipsis; }
+.group-head { display: flex; align-items: baseline; gap: 10px; padding: 14px 16px 6px; }
+.table-wrap + .group-head { border-top: 1px solid var(--border-subtle); }
 .nav { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 10px; }
 .nav-label { padding: 12px 8px 4px; font-size: 12px; line-height: 16px; color: var(--text-muted); }
 .nav a { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: 8px; color: var(--text-default); font-size: 14px; }
@@ -201,6 +205,7 @@ pre { font-family: var(--mono); font-size: 12px; line-height: 1.5; background: v
   .side { position: static; height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border-subtle); }
   .side-top { padding: 10px 12px; }
   .workspace, .side-foot, .nav-label, .nav .count { display: none; }
+  .workspace.pick { display: flex; min-width: 150px; }
   .nav { flex-direction: row; padding: 6px 8px; }
   .nav a { white-space: nowrap; }
   .topbar { position: static; padding: 8px 16px; }

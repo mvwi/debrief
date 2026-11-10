@@ -209,6 +209,7 @@ def test_export_keys_prs_by_repo(conn, tmp_path, fake_gh, monkeypatch):
     github.main([])
     monkeypatch.setattr(export_site, "connect", db.connect)  # the scratch database, as patched by `conn`
     monkeypatch.setattr(export_site, "SITE_OUT", tmp_path / "site")
+    monkeypatch.setattr(export_site.config, "projects", lambda: [r[0] for r in conn.execute("SELECT DISTINCT cwd FROM sessions")])
     export_site.main([])
     index = json.loads((tmp_path / "site" / "data" / "index.json").read_text())
     assert index["meta"]["has"]["github"] and index["meta"]["repo"] is None  # two repos: no single name
@@ -226,6 +227,7 @@ def sync_stages(monkeypatch):
     """Run `debrief sync --dry-run` with every stage but github stubbed out; returns the github argvs."""
     ran = []
     stage = cli.stage
+    monkeypatch.setattr(cli, "pick_projects", lambda dirs: True)  # as if a project were picked
     monkeypatch.setattr(cli, "stage", lambda name, argv: ran.append(argv) if name == "github" else None)
     return ran, stage
 
@@ -250,6 +252,7 @@ def test_sync_goes_on_when_a_gh_call_fails(monkeypatch, capsys):
         if name == "github":
             raise RuntimeError("gh api x failed: HTTP 502\nmore")
     monkeypatch.setattr(cli, "stage", stage)
+    monkeypatch.setattr(cli, "pick_projects", lambda dirs: True)
     cli.sync(["--dry-run"])
     assert capsys.readouterr().out.strip() == "github: skipped, gh api x failed: HTTP 502"
 

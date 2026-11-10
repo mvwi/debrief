@@ -115,3 +115,17 @@ def test_load_env_reads_the_key_file(cfg, monkeypatch):
     monkeypatch.setattr(config, "load_dotenv", lambda path=None: path and config.os.environ.update(config.dotenv_values(path)))
     config.load_env()
     assert os.environ.pop(config.KEY) == FAKE_KEY
+
+
+def test_picked_projects_round_trip_and_survive_other_saves(cfg):
+    assert config.projects() == []
+    config.save({"label": {"llm": "openrouter"}})
+    config.pick("/home/me/alpha")
+    config.pick('/home/me/odd "name"')
+    config.pick("/home/me/alpha")  # already picked
+    assert config.projects() == ["/home/me/alpha", '/home/me/odd "name"']
+    assert config.choose("label")[0] == "openrouter" and config.settings()["projects"] == config.projects()
+    for bad in ("/a", ["relative/path"], [1]):
+        with pytest.raises(ValueError, match="absolute paths"):
+            config.save({"projects": {"include": bad}})
+    assert config.projects() == ["/home/me/alpha", '/home/me/odd "name"']

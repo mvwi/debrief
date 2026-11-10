@@ -135,3 +135,20 @@ def test_run_claude_prints_progress_without_item_text(tmp_path, monkeypatch, cap
 
     classify.run_claude(conn, "m", items, 1, verbose=True)
     assert "ok   item 1" in capsys.readouterr().out
+
+
+def test_items_are_built_only_for_the_sessions_and_repos_asked_for(tmp_path):
+    from debrief.db import connect
+    conn = connect(tmp_path / "debrief.db")
+    for sid in ("in", "out"):
+        conn.execute("INSERT INTO sessions (session_id, started_at) VALUES (?, '2026-01-05')", (sid,))
+        conn.execute("INSERT INTO messages (session_id, idx, role, user_kind, text) VALUES (?, 0, 'user', 'human', 'hi')", (sid,))
+    for n, repo in ((1, "acme/in"), (2, "acme/out")):
+        conn.execute("INSERT INTO gh_review_comments (comment_id, repo, pr_number, body, kind) VALUES (?, ?, 1, 'nit', 'inline')", (n, repo))
+        conn.execute("INSERT INTO gh_checks (check_id, repo, commit_sha, name, conclusion, failure_log) "
+                     "VALUES (?, ?, 'c', 'test', 'failure', 'boom')", (n, repo))
+    turns, tails, sessions = classify.session_items(conn, None, {"in"})
+    assert {it["key"][0] for it in [*turns, *tails, *sessions]} == {"in"}
+    reviews, checks = classify.event_items(conn, {"acme/in"})
+    assert [it["key"] for it in reviews + checks] == [("review_comment", 1), ("check_failure", 1)]
+    assert len(classify.session_items(conn, None)[2]) == 2 and len(classify.event_items(conn)[0]) == 2

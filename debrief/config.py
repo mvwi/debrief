@@ -8,12 +8,17 @@ Set in DEBRIEF_HOME/config.toml, one table per stage:
 
 `[github] enabled = false` stops sync from asking GitHub about your sessions' pull requests.
 
+`[projects] include = ["/abs/path", ...]` picks the projects to analyse: only their sessions
+are labeled, turned into findings and ideas, and shown in the report. With none picked, sync
+stops after ingest. `debrief sync --project DIR` adds one.
+
 A flag beats an environment variable, which beats config.toml, which beats DEFAULTS.
 
 The Settings page of `debrief open` writes config.toml, and keeps an OpenRouter key in
 DEBRIEF_HOME/.env.
 """
 
+import json
 import os
 import re
 import sys
@@ -52,6 +57,11 @@ def check(cfg: dict) -> None:
     for stage, table in cfg.items():
         if stage == "github" and isinstance(table, dict):
             continue
+        if stage == "projects" and isinstance(table, dict):
+            include = table.get("include", [])
+            if not isinstance(include, list) or not all(isinstance(p, str) and os.path.isabs(p) for p in include):
+                raise ValueError("[projects] include must be a list of absolute paths")
+            continue
         if stage not in DEFAULTS or not isinstance(table, dict):
             raise ValueError(f"unknown stage [{stage}]. Stages: {', '.join(DEFAULTS)}")
         llm, model = table.get("llm", next(iter(DEFAULTS[stage]))), table.get("model")
@@ -82,6 +92,9 @@ def save(cfg: dict) -> None:
             lines += [f"[{stage}]", *rows, ""]
     if "github" in cfg:
         lines += ["[github]", f"enabled = {'false' if cfg['github'].get('enabled') is False else 'true'}", ""]
+    if include := cfg.get("projects", {}).get("include"):
+        # A JSON list of strings is a TOML one too, escapes included.
+        lines += ["[projects]", f"include = {json.dumps(include, ensure_ascii=False)}", ""]
     HOME.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_PATH.with_suffix(".toml.tmp")
     tmp.write_text("\n".join(lines))
@@ -129,6 +142,7 @@ def settings() -> dict:
                            "overrides": {llm: ENV[stage, llm] for llm in llms if env.get(ENV.get((stage, llm)))}}
                    for stage, llms in DEFAULTS.items()},
         "github": cfg.get("github", {}).get("enabled", True) is not False,
+        "projects": cfg.get("projects", {}).get("include", []),
         "key": {"set": bool(key), "last4": key[-4:] if len(key) >= 20 else "", "source": "env" if shell_key else "file"},
     }
 
@@ -149,9 +163,22 @@ def github_enabled() -> bool:
     return load().get("github", {}).get("enabled", True) is not False
 
 
+def projects() -> list[str]:
+    """The picked projects: the folders `[projects] include` lists. Empty when none is picked."""
+    return load().get("projects", {}).get("include", [])
+
+
+def pick(project: str) -> None:
+    """Add a folder to the picked projects."""
+    cfg = load()
+    if project not in projects():
+        save({**cfg, "projects": {"include": [*projects(), project]}})
+
+
 def main(argv: list[str] | None = None) -> None:
     """Print the model each stage will use."""
     print(f"{CONFIG_PATH}{'' if CONFIG_PATH.exists() else ' (not there; using defaults)'}")
     for stage in DEFAULTS:
         llm, model = choose(stage)
         print(f"  {stage:<11}{llm:<13}{model}")
+    print(f"  projects   {', '.join(projects()) or 'none picked: `debrief sync` lists them'}")

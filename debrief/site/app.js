@@ -67,10 +67,11 @@ const state = {
   sessionCache: new Map(),
   shardCache: new Map(),
   memo: new Map(),
-  scope: { period: "all", agent: "" },
+  scope: { period: "all", agent: "", project: "" },  // project: a folder, NO_PROJECT, or "" for all
+  projects: [],       // [folder, label, sessions], most sessions first
   recFilter: { q: "", lever: "", sort: "sessions", dir: -1 },
   correctionsFilter: { signal: "", ctype: "", dir: "" },
-  sessionFilter: { q: "", author: "", project: "", outcome: "", corrected: false, sort: "started", dir: -1 },
+  sessionFilter: { q: "", author: "", outcome: "", corrected: false, sort: "started", dir: -1 },
   evTab: "all",
   overviewGroup: "agent",
   lastPage: null,
@@ -144,12 +145,31 @@ const personLabel = (author, none = "Unknown") => (!author || author === NO_PERS
 // A session's project is the folder it ran in: show the last part, filter on the whole path.
 const NO_PROJECT = "(no project)";
 const pathTail = (p, n = 1) => String(p).replace(/[\\/]+$/, "").split(/[\\/]/).slice(-n).join("/") || p;
-const projectName = (p) => (p ? pathTail(p) : "Unknown");
+const projectName = (p) => (p ? state.projects.find((x) => x[0] === p)?.[1] || pathTail(p) : "Unknown");
+// The side bar's picker sets state.scope.project, which scopes every page.
+const PROJECT_KEY = "debrief.project";
+const inProject = (s, p = state.scope.project) => !p || (p === NO_PROJECT ? !s.project : s.project === p);
+const allSessions = () => state.data.sessions.filter((s) => inProject(s));
+// An idea is about one project, or spans them (project null: prompting habits, and runs from before
+// projects). A picked project shows its own ideas and the spanning ones whose evidence touches it.
+const recsFor = (p) => state.data.recommendations.filter((r) => !p || (r.project ? r.project === p : r.sessions.some((id) => inProject(state.sessionsById.get(id) || {}, p))));
+const allRecs = () => recsFor(state.scope.project);
+const fromSessions = () => (state.scope.project ? `the ${plural(allSessions().length, "session")} in ${esc(workspaceLabel())}` : `all ${fmt(allSessions().length)} sessions`);
+const ACROSS_TIP = "Built from more than one project; some of its evidence is from this one.";
+const acrossPill = (r) => (state.scope.project && !r.project ? ` <span class="pill" data-tip="${ACROSS_TIP}">across projects</span>` : "");
+function pickProject(p) {
+  state.scope.project = p;
+  try { localStorage.setItem(PROJECT_KEY, p); } catch { /* private window: the pick lasts until reload */ }
+  if ($("#project-pick")) $("#project-pick").value = p;
+  rerender();
+}
 // Who ran a session and with what, for a row's second line.
 const ranBy = (s) => [has("people") && personLabel(s.author), s.agent].filter(Boolean).join(" · ");
-// Shown in the side bar and the intro: the GitHub repo, the one project, or how many projects.
+// Shown in the intro, and in the side bar when there is one project: the picked project, the GitHub repo,
+// the one project, or how many projects.
 function workspaceLabel() {
   const d = state.data;
+  if (state.scope.project) return projectName(state.scope.project === NO_PROJECT ? null : state.scope.project);
   if (d.meta.repo) return d.meta.repo;
   const projects = new Set(d.sessions.map((s) => s.project).filter(Boolean));
   return projects.size === 1 ? projectName([...projects][0]) : projects.size ? plural(projects.size, "project") : "";
@@ -157,9 +177,16 @@ function workspaceLabel() {
 // A card that says what is missing and how to get it, in place of empty tables.
 const notice = (title, text) => `<section class="card"><div class="card-body"><h2>${esc(title)}</h2><p>${text}</p></div></section>`;
 const NOTICES = {
-  sessions: () => notice("No sessions yet", "debrief found no agent sessions to report on. Run <code>debrief sync</code> to import them."),
+  // The report holds picked projects only; index.json's projects lists the rest.
+  sessions: () => (state.data.projects?.length
+    ? notice("No project picked", `debrief found ${plural(state.data.projects.length, "project")} and analyses only the ones you pick. Run <code>debrief sync</code> to list them, then <code>debrief sync --project DIR</code> to pick one.`)
+    : notice("No sessions yet", "debrief found no agent sessions to report on. Run <code>debrief sync</code> to import them.")),
   labels: () => notice("Sessions imported, not analysed yet", `${plural(state.data.sessions.length, "session")} to <a href="#sessions">browse</a>, but none is labelled yet, so there are no correction rates or ideas. Run <code>debrief sync</code> to label them.`),
-  ideas: () => notice("No ideas yet", "The messages are labelled, but no findings or ideas have been written from them. Run <code>debrief sync</code> to finish the analysis."),
+  // A picked project can have none while the run has some.
+  ideas: () => (state.scope.project && state.data.recommendations.length
+    ? notice("No ideas for this project", `No idea in this run is about ${esc(workspaceLabel())} or cites its sessions.`)
+    : NOTICES.noIdeas()),
+  noIdeas: () => notice("No ideas yet", "The messages are labelled, but no findings or ideas have been written from them. Run <code>debrief sync</code> to finish the analysis."),
 };
 const correctedTurns = (s) => s.friction.filter(([, sig]) => sig.some((x) => CORRECTING.includes(x))).length;
 
@@ -232,13 +259,13 @@ const startedAt = (s) => Math.max(time(s.started), time(state.data.meta.from));
 
 // Sessions and everything tied to them, for the current scope (offset 1 = the previous window).
 function scoped(offset = 0) {
-  const key = `${state.scope.period}|${state.scope.agent}|${offset}`;
+  const key = `${state.scope.period}|${state.scope.agent}|${state.scope.project}|${offset}`;
   if (state.memo.has(key)) return state.memo.get(key);
   const w = windowFor(offset);
   let out = null;
   if (w) {
     const d = state.data;
-    const S = d.sessions.filter((s) => (!state.scope.agent || s.agent === state.scope.agent) && startedAt(s) >= w[0] && startedAt(s) < w[1]);
+    const S = d.sessions.filter((s) => inProject(s) && (!state.scope.agent || s.agent === state.scope.agent) && startedAt(s) >= w[0] && startedAt(s) < w[1]);
     const ids = new Set(S.map((s) => s.id));
     const prs = new Set(S.flatMap((s) => s.prs.map((p) => p.n)));
     out = {
@@ -429,7 +456,7 @@ function recTable(recs, { compact = false, sortable = false } = {}) {
   return `<div class="table-wrap"><table><thead><tr><th>Idea</th><th>Type</th>
     ${th("sessions", "Sessions", "r")}${has("people") ? th("people", "People", "r") : ""}</tr></thead>
     <tbody>${recs.map((r) => `<tr class="click" data-href="rec~${r.id}">
-      <td style="min-width:260px"><div class="cell-title">${esc(r.title)}${weakPill(r)}</div>${!compact && r.target ? `<div class="cell-sub mono">${esc(r.target)}</div>` : ""}</td>
+      <td style="min-width:260px"><div class="cell-title">${esc(r.title)}${weakPill(r)}${acrossPill(r)}</div>${!compact && r.target ? `<div class="cell-sub mono">${esc(r.target)}</div>` : ""}</td>
       <td class="nowrap">${esc(lever(r.lever))}</td>
       <td class="r">${r.sessions.length}</td>${has("people") ? `<td class="r">${r.people}</td>` : ""}</tr>`).join("")}</tbody></table></div>`;
 }
@@ -465,7 +492,8 @@ function turnRows(turns) {
 // ---------- chrome ----------
 
 function renderNav(active) {
-  const counts = { recs: state.data.recommendations.length, sessions: state.data.sessions.length };
+  const counts = { recs: allRecs().length, sessions: allSessions().length };
+  if ($("#foot-sessions")) $("#foot-sessions").textContent = fmt(counts.sessions);
   $("#nav").innerHTML = pages().map((p, i, shown) => `${p.secondary && !shown[i - 1]?.secondary ? '<div class="nav-label">About</div>' : ""}<a href="#${p.id}"${p.id === active ? ' aria-current="page"' : ""}>
     <svg viewBox="0 0 16 16" aria-hidden="true">${ICONS[p.id]}</svg><span>${esc(p.label)}</span>${counts[p.id] ? `<span class="count">${counts[p.id]}</span>` : ""}</a>`).join("");
 }
@@ -486,7 +514,7 @@ function scopeLabel() {
   const sc = scoped();
   const w = sc.window;
   const from = w[0] > time(state.data.meta.from) ? day(w[0]) : day(state.data.meta.from);
-  return `${from} – ${day(state.data.meta.to)} · ${plural(sc.S.length, "session")}${state.scope.agent ? ` · ${esc(state.scope.agent)}` : ""}`;
+  return `${from} – ${day(state.data.meta.to)} · ${state.scope.project ? `${esc(workspaceLabel())} · ` : ""}${plural(sc.S.length, "session")}${state.scope.agent ? ` · ${esc(state.scope.agent)}` : ""}`;
 }
 
 // ---------- routing ----------
@@ -524,7 +552,7 @@ function viewOverview() {
   const m = metrics(sc.S);
   const pm = prev && prev.S.length >= 5 ? metrics(prev.S) : null;
   const wk = weekly(sc.S);
-  const recs = d.recommendations;
+  const recs = allRecs();
   if (!has("labels")) return NOTICES.labels();
 
   const kpis = [
@@ -542,7 +570,7 @@ function viewOverview() {
     ], { fmtY: (v) => v.toFixed(v < 10 && v % 1 ? 1 : 0), unit: "%" }),
   });
 
-  const top = card({ title: "Top ideas", def: "reach", tip: "The ideas touching the most sessions. Built from all sessions; the period filter does not apply.", flush: true,
+  const top = card({ title: "Top ideas", def: "reach", tip: "The ideas touching the most sessions. Built from every session in scope; the period filter does not apply.", flush: true,
     body: recTable(recs.slice(0, 8), { compact: true }), foot: `<a href="#recs">View all ${recs.length} ideas →</a>` });
 
   const agentRows = [...groupBy(sc.S, (s) => s.agent)].map(([a, ss]) => [a, metrics(ss), restsOnOne(ss)]).sort((x, y) => y[1].sessions - x[1].sessions);
@@ -571,14 +599,22 @@ function viewOverview() {
       ${dirs.map((g) => `<tr class="click" data-dir="${esc(g.dir)}"><td class="mono">${esc(g.dir)}</td><td class="r">${g.sessions.size}</td><td class="r">${g.turns.size}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">No hotspots in this period.</div>`,
     foot: `<a href="#corrections">Open corrections →</a>` });
 
+  // All projects: one row each, biggest first; a row picks its project.
+  const byProject = state.scope.project || state.projects.length < 2 ? "" : card({ title: "By project", tip: "Each project's sessions in this period. Ideas are counted for the whole run. Pick a row to see only that project.", flush: true,
+    foot: state.projects.length > 8 ? `<span class="muted">The 8 projects with the most sessions. The picker in the side bar lists all ${state.projects.length}.</span>` : "",
+    body: `<div class="table-wrap tight"><table><thead><tr><th>Project</th><th class="r">Sessions</th><th class="r">Messages</th><th class="r">Agent corrected</th><th class="r">Ideas</th></tr></thead><tbody>
+      ${state.projects.map(([p, label]) => [p, label, metrics(sc.S.filter((s) => inProject(s, p)))]).filter(([, , mm]) => mm.sessions).slice(0, 8).map(([p, label, mm]) => `<tr class="click" data-project="${esc(p)}" tabindex="0" title="${esc(p)}"><td class="nowrap">${esc(label)}</td><td class="r">${mm.sessions}</td><td class="r">${fmt(mm.turns)}</td>
+        <td class="r" data-tip="${mm.corrected} of ${mm.turns} messages">${pctText(mm.correctedRate)}</td><td class="r">${d.recommendations.filter((r) => r.project === p).length}</td></tr>`).join("")}
+      </tbody></table></div>` });
+
   const section = (title, sub) => `<div class="section-title"><h2>${esc(title)}</h2>${sub ? `<span>${sub}</span>` : ""}</div>`;
   return `${intro()}
     ${section("Statistics", scopeLabel())}
     <div class="kpis cols-3">${kpis}</div>
-    <div class="grid"><div class="span-7">${trend}</div><div class="span-5">${byAgent}</div></div>
+    <div class="grid"><div class="span-7">${trend}</div><div class="span-5">${byAgent}</div>${byProject ? `<div class="span-12">${byProject}</div>` : ""}</div>
     ${section("Corrections", scopeLabel())}
     <div class="grid"><div class="span-12">${hot}</div></div>
-    ${section("Ideas", `From all ${fmt(d.sessions.length)} sessions; the period and harness filters don't apply`)}
+    ${section("Ideas", `From ${fromSessions()}; the period and harness filters don't apply`)}
     <div class="grid"><div class="span-12">${recs.length ? top : NOTICES.ideas()}</div></div>`;
 }
 
@@ -588,10 +624,11 @@ const bugName = (title) => title.replace(/^(check and file:\s*|(fix|track|make|r
 // The first thing a new viewer reads: what this is, and three findings computed from all sessions.
 function intro() {
   const d = state.data;
-  const all = d.sessions;
+  const all = allSessions();
+  const recs = allRecs();
   const m = metrics(all);
   const prs = new Set(all.flatMap((s) => s.prs.filter((p) => p.state !== "open").map((p) => p.n))).size;
-  const people = has("people") ? ` from ${plural(d.recommendations[0]?.people, "person", "people")}` : "";
+  const people = has("people") ? ` from ${plural(recs[0]?.people, "person", "people")}` : "";
   const stats = [`${fmt(all.length)} sessions`, has("people") && plural(m.people, "person", "people"), `${fmt(m.turns)} human messages`,
     has("github") && `${fmt(prs)} merged or closed PRs with CI and review`, `${day(d.meta.from)} – ${day(d.meta.to)}`].filter(Boolean).join(" · ");
 
@@ -607,9 +644,9 @@ function intro() {
     .map((x) => `${esc(x.a)}'s ${x.rate > hi.rate ? "higher" : "lower"} rate comes mostly from one session.`) : [];
   const agentLine = [compared, ...caveats].filter(Boolean).join(" ");
 
-  const top = d.recommendations[0];
+  const top = recs[0];
   // Bug ideas whose evidence held up; weak ones stay on the Ideas page but aren't counted here.
-  const bugs = d.recommendations.filter((r) => !r.weak && r.findings.some((i) => d.findings[i]?.kind === "found_not_filed"));
+  const bugs = recs.filter((r) => !r.weak && r.findings.some((i) => d.findings[i]?.kind === "found_not_filed"));
 
   const findings = [
     m.corrected && { big: `1 in ${Math.round(1 / m.correctedRate)}`, what: "messages people send an agent correct its work.", detail: agentLine, go: "See the messages", href: "#corrections" },
@@ -648,7 +685,7 @@ function hotspotDirs(sc) {
 function filteredRecs() {
   const f = state.recFilter;
   const q = f.q.trim().toLowerCase();
-  return state.data.recommendations.filter((r) => (!f.lever || r.lever === f.lever) &&
+  return allRecs().filter((r) => (!f.lever || r.lever === f.lever) &&
     (!q || `${r.title} ${r.target} ${r.problem}`.toLowerCase().includes(q)));
 }
 
@@ -657,17 +694,24 @@ function viewRecs() {
   renderTopbar({ crumbs: [{ label: "Ideas" }] });
   const f = state.recFilter;
   const recs = filteredRecs();
-  if (!d.recommendations.length) return has("labels") ? NOTICES.ideas() : NOTICES.labels();
-  const levers = [...new Set([...Object.keys(d.levers || {}), ...d.recommendations.map((r) => r.lever)])];
-  const segs = [["", "All", d.recommendations.length], ...levers.map((k) => [k, lever(k), d.recommendations.filter((r) => r.lever === k).length]).filter(([, , n]) => n)];
-  return `<p class="page-sub">${d.recommendations.length} ideas from all ${d.meta.sessions} sessions, sorted by how many sessions each touches. Each is a lead to check against its evidence, not a verdict.</p>
+  const all = allRecs();
+  if (!all.length) return has("labels") ? NOTICES.ideas() : NOTICES.labels();
+  const levers = [...new Set([...Object.keys(d.levers || {}), ...all.map((r) => r.lever)])];
+  const segs = [["", "All", all.length], ...levers.map((k) => [k, lever(k), all.filter((r) => r.lever === k).length]).filter(([, , n]) => n)];
+  // All projects: a table per project, biggest first, then the ideas that span projects.
+  // A run from before ideas had projects has no groups, so it stays one table.
+  const groups = state.scope.project ? [] : state.projects.map(([p, label]) => [label, recs.filter((r) => r.project === p)]).filter(([, rs]) => rs.length);
+  const tables = groups.length
+    ? [...groups, ["Across projects", recs.filter((r) => !r.project)]].filter(([, rs]) => rs.length).map(([label, rs]) => `<div class="group-head"><h3>${esc(label)}</h3><span class="muted small num">${plural(rs.length, "idea")}</span></div>${recTable(sortRecs(rs), { sortable: true })}`).join("")
+    : recTable(sortRecs(recs), { sortable: true });
+  return `<p class="page-sub">${all.length} ideas from ${fromSessions()}, sorted by how many sessions each touches. Each is a lead to check against its evidence, not a verdict.</p>
     <section class="card">
       <div class="toolbar">
         <input type="search" id="rec-q" placeholder="Search ideas" value="${esc(f.q)}" aria-label="Search ideas">
         <div class="seg-ctl" role="group" aria-label="Type">${segs.map(([k, l, n]) => `<button type="button" data-rec-lever="${esc(k)}" aria-pressed="${f.lever === k}">${esc(l)}<span class="n">${n}</span></button>`).join("")}</div>
         <span class="spacer"></span><span class="muted small num">${recs.length} shown</span>
       </div>
-      ${recTable(sortRecs(recs), { sortable: true })}
+      ${tables}
     </section>`;
 }
 
@@ -675,7 +719,8 @@ function viewRec(id) {
   const d = state.data;
   const r = d.recommendations.find((x) => String(x.id) === String(id));
   if (!r) { renderTopbar({ crumbs: [{ label: "Ideas", href: "#recs" }, { label: "Not found" }] }); return `<div class="empty">This idea is not in the current run.</div>`; }
-  const order = sortRecs(d.recommendations);
+  // Step through the picked project's ideas; an idea opened from outside it steps through all.
+  const order = sortRecs(allRecs().includes(r) ? allRecs() : d.recommendations);
   const i = order.indexOf(r);
   const pager = `<div class="pager"><a href="#rec~${order[i - 1]?.id}" aria-label="Previous idea" aria-disabled="${i === 0}">↑</a><a href="#rec~${order[i + 1]?.id}" aria-label="Next idea" aria-disabled="${i === order.length - 1}">↓</a></div>`;
   renderTopbar({ crumbs: [{ label: "Ideas", href: "#recs" }, { label: r.title }], right: pager });
@@ -701,6 +746,7 @@ function viewRec(id) {
   const props = `<aside class="card props">
     <dl>
       <dt>Type</dt><dd>${esc(lever(r.lever))}</dd>
+      ${state.projects.length > 1 ? `<dt>Project</dt><dd${r.project ? ` title="${esc(r.project)}"` : ""}>${r.project ? esc(projectName(r.project)) : "Across projects"}</dd>` : ""}
       ${r.target ? `<dt>Lands in</dt><dd class="mono small">${esc(r.target)}</dd>` : ""}
     </dl>
     <div class="section"><h3>Reach</h3>
@@ -845,7 +891,7 @@ function viewAdoption() {
   renderTopbar({ crumbs: [{ label: "Adoption" }], scope: true });
   const sc = scoped();
   const S = sc.S;
-  const all = state.data.sessions;
+  const all = allSessions();
   const agents = [...new Set(all.map((s) => s.agent))].sort((a, b) => all.filter((s) => s.agent === b).length - all.filter((s) => s.agent === a).length);
   const wk = weekly(S);
   const labelled = has("labels");
@@ -964,7 +1010,7 @@ function viewDelivery() {
   const who = [["Bots", botInline], ["People", inlineR.filter((r) => !r.bot)]];
   const botRows = [...groupBy(botInline, (r) => r.author)].sort((a, b) => b[1].length - a[1].length);
   // Ideas that cite a CI run or a review comment.
-  const related = state.data.recommendations.filter((r) => r.evidence.some((k) => ["check", "review"].includes(state.data.refs[k]?.type)));
+  const related = allRecs().filter((r) => r.evidence.some((k) => ["check", "review"].includes(state.data.refs[k]?.type)));
   // Infra failures aren't the code's fault; a module-download error names whatever file did the import.
   const placed = fails.filter((f) => f.area && f.class !== "infra_or_env");
   const byArea = [...groupBy(placed, (f) => f.area)].sort((a, b) => b[1].length - a[1].length).slice(0, 10);
@@ -1019,7 +1065,7 @@ function filteredSessions() {
   const f = state.sessionFilter;
   const q = f.q.trim().toLowerCase();
   const S = scoped().S.filter((s) => (!f.author || (f.author === NO_PERSON ? !s.author : s.author === f.author)) &&
-    (!f.project || (f.project === NO_PROJECT ? !s.project : s.project === f.project)) && (!f.outcome || s.outcome === f.outcome) && (!f.corrected || correctedTurns(s) > 0) &&
+    (!f.outcome || s.outcome === f.outcome) && (!f.corrected || correctedTurns(s) > 0) &&
     (!q || `${s.name} ${s.prompt} ${s.id} ${s.project || ""} ${s.prs.map((p) => p.n).join(" ")}`.toLowerCase().includes(q)));
   const key = { started: (s) => s.started, turns: (s) => s.human_turns, corrections: correctedTurns, name: (s) => (s.name || "").toLowerCase() }[f.sort];
   return S.slice().sort((a, b) => (key(a) > key(b) ? 1 : key(a) < key(b) ? -1 : 0) * f.dir);
@@ -1029,13 +1075,8 @@ function viewSessions() {
   renderTopbar({ crumbs: [{ label: "Sessions" }], scope: true });
   const f = state.sessionFilter;
   const S = filteredSessions();
-  const all = state.data.sessions;
+  const all = allSessions();
   const authors = [...new Set(all.map((s) => s.author).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  // Two folders with the same name show their parent too, so the options stay distinct.
-  const projects = [...new Set(all.map((s) => s.project).filter(Boolean))];
-  const sameName = groupBy(projects, projectName);
-  const projectOpts = projects.map((p) => [p, pathTail(p, sameName.get(projectName(p)).length > 1 ? 2 : 1)]).sort((a, b) => a[1].localeCompare(b[1]));
-  const noProject = all.some((s) => !s.project);
   const col = { project: has("projects"), person: has("people"), pr: has("github") };
   const th = (k, l, cls = "") => `<th class="sortable ${cls}" data-sort="${k}" aria-sort="${f.sort === k ? (f.dir > 0 ? "ascending" : "descending") : "none"}">${l}${f.sort === k ? (f.dir > 0 ? " ↑" : " ↓") : ""}</th>`;
   setTimeout(wireSessions, 0);
@@ -1043,7 +1084,6 @@ function viewSessions() {
     <section class="card">
       <div class="toolbar">
         <input type="search" id="s-q" placeholder="Search name${col.project ? ", project" : ""}${col.pr ? ", prompt or PR" : " or prompt"}" value="${esc(f.q)}" aria-label="Search sessions">
-        ${col.project && projects.length + noProject > 1 ? `<select id="s-project" aria-label="Project" style="max-width:220px"><option value="">All projects</option>${projectOpts.map(([p, l]) => `<option value="${esc(p)}" title="${esc(p)}"${p === f.project ? " selected" : ""}>${esc(l)}</option>`).join("")}${noProject ? `<option value="${esc(NO_PROJECT)}"${f.project === NO_PROJECT ? " selected" : ""}>Unknown</option>` : ""}</select>` : ""}
         ${col.person ? `<select id="s-author" aria-label="Person"><option value="">All people</option>${authors.map((a) => `<option${a === f.author ? " selected" : ""}>${esc(a)}</option>`).join("")}${all.some((s) => !s.author) ? `<option value="${esc(NO_PERSON)}"${f.author === NO_PERSON ? " selected" : ""}>Unknown</option>` : ""}</select>` : ""}
         <select id="s-outcome" aria-label="Outcome"><option value="">Any outcome</option>${Object.entries(OUTCOMES).map(([k, l]) => `<option value="${k}"${k === f.outcome ? " selected" : ""}>${l}</option>`).join("")}</select>
         <label class="check"><input type="checkbox" id="s-corrected"${f.corrected ? " checked" : ""}> Has corrections</label>
@@ -1060,7 +1100,6 @@ function wireSessions() {
   const f = state.sessionFilter;
   $("#s-q")?.addEventListener("input", (e) => { f.q = e.target.value; rerender(); });
   $("#s-author")?.addEventListener("change", (e) => { f.author = e.target.value; rerender(); });
-  $("#s-project")?.addEventListener("change", (e) => { f.project = e.target.value; rerender(); });
   $("#s-outcome")?.addEventListener("change", (e) => { f.outcome = e.target.value; rerender(); });
   $("#s-corrected")?.addEventListener("change", (e) => { f.corrected = e.target.checked; rerender(); });
   $$("th[data-sort]").forEach((th) => th.addEventListener("click", () => { const k = th.dataset.sort; f.dir = f.sort === k ? -f.dir : -1; f.sort = k; rerender(); }));
@@ -1333,6 +1372,8 @@ function initEvents() {
       if (el.dataset.author) state.sessionFilter.author = el.dataset.author;
       if (el.dataset.dir) { location.hash = `corrections~dir~${encodeURIComponent(el.dataset.dir)}`; return; }
     }
+    const pick = e.target.closest("[data-project]");
+    if (pick) { pickProject(pick.dataset.project); window.scrollTo(0, 0); return; }
     const row = e.target.closest("[data-href]");
     if (row && !e.target.closest("a,button,select,input")) location.hash = row.dataset.href;
     const jump = e.target.closest("[data-jump]");
@@ -1355,8 +1396,8 @@ function initEvents() {
     if (rl) { state.recFilter.lever = rl.dataset.recLever; rerender(); }
   });
   document.addEventListener("keydown", (e) => {
-    const row = e.target.closest?.("[data-href]");
-    if (row && row === e.target && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); location.hash = row.dataset.href; }
+    const row = e.target.closest?.("[data-href],[data-project]");
+    if (row && row === e.target && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); row.click(); }
   });
   document.addEventListener("input", (e) => { if (e.target.id === "rec-q") { state.recFilter.q = e.target.value; rerender(); } });
   document.addEventListener("change", (e) => {
@@ -1396,9 +1437,22 @@ async function boot() {
   d.recommendations.sort(byReach);
   for (const s of d.sessions) state.sessionsById.set(s.id, s);
   for (const r of d.recommendations) for (const sid of r.sessions) (state.recsBySession.get(sid) || state.recsBySession.set(sid, []).get(sid)).push(r);
+  // Projects by session count. Two folders with the same name show their parent too, so they stay distinct.
+  const byProject = groupBy(d.sessions, (s) => s.project || NO_PROJECT);
+  const sameName = groupBy([...byProject.keys()], (p) => pathTail(p));
+  state.projects = [...byProject].map(([p, ss]) => [p, p === NO_PROJECT ? "Unknown" : pathTail(p, sameName.get(pathTail(p)).length > 1 ? 2 : 1), ss.length])
+    .sort((a, b) => b[2] - a[2] || a[1].localeCompare(b[1]));
+  let saved = "";
+  try { saved = localStorage.getItem(PROJECT_KEY) || ""; } catch { /* no storage: start on all projects */ }
+  if (byProject.has(saved)) state.scope.project = saved;
   const m = d.meta;
-  $("#workspace").innerHTML = `<span>${esc(workspaceLabel())}</span>`;
-  $("#side-foot").innerHTML = `<div class="row"><span>Sessions</span><span>${fmt(m.sessions)}</span></div>
+  const picker = state.projects.length > 1;
+  $("#workspace").classList.toggle("pick", picker);
+  $("#workspace").innerHTML = picker
+    ? `<select id="project-pick" aria-label="Project"><option value="">All projects</option>${state.projects.map(([p, label, n]) => `<option value="${esc(p)}" title="${esc(p)}"${p === state.scope.project ? " selected" : ""}>${esc(label)} (${n})</option>`).join("")}</select>`
+    : `<span>${esc(workspaceLabel())}</span>`;
+  $("#project-pick")?.addEventListener("change", (e) => pickProject(e.target.value));
+  $("#side-foot").innerHTML = `<div class="row"><span>Sessions</span><span id="foot-sessions"></span></div>
     ${m.to ? `<div class="row"><span>Window</span><span>${esc(day(m.from))} – ${esc(day(m.to))}</span></div>` : ""}
     <div class="row"><span>Label confidence</span><span>≥ ${m.min_conf}</span></div>`;
   correctionsFromHash();

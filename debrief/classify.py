@@ -38,8 +38,8 @@ from datetime import UTC, datetime
 
 import httpx
 
-from debrief.config import choose, load_env
-from debrief.db import connect
+from debrief.config import choose, load_env, projects
+from debrief.db import connect, repo_projects, session_projects
 from debrief.synthesize import ClaudeCodeError, ask_claude_code
 
 URL = "https://openrouter.ai/api/alpha/decisions"
@@ -401,12 +401,14 @@ def item(table: str, key: tuple, state: str, questions: dict, label: str) -> dic
     return {"table": table, "key": key, "state": state, "questions": questions, "label": label}
 
 
-def session_items(conn, session_filter: str | None) -> tuple[list, list, list]:
-    """Build (turn, tail, session) items for every session with messages."""
+def session_items(conn, session_filter: str | None, only: set[str] | None = None) -> tuple[list, list, list]:
+    """Build (turn, tail, session) items for every session with messages; with `only`, just those sessions."""
     where, params = ("WHERE session_id = ?", (session_filter,)) if session_filter else ("", ())
     turns, tails, sessions = [], [], []
     for sess in conn.execute(f"SELECT * FROM sessions {where} ORDER BY started_at", params).fetchall():
         sid = sess["session_id"]
+        if only is not None and sid not in only:
+            continue
         msgs = conn.execute("SELECT * FROM messages WHERE session_id = ? ORDER BY idx", (sid,)).fetchall()
         if not msgs:
             continue
@@ -457,13 +459,16 @@ def thread_status(c) -> str:
     return f"Thread: {', '.join(f for f in flags if f) or 'status unknown'}\n"
 
 
-def event_items(conn) -> tuple[list, list]:
+def event_items(conn, repos: set[str] | None = None) -> tuple[list, list]:
+    """Review comment and failed check items; with `repos`, just those repos'."""
     reviews = []
     roots = conn.execute(  # skip review bodies with no text: plain approvals
         "SELECT * FROM gh_review_comments WHERE in_reply_to IS NULL "
         "AND NOT (kind = 'review' AND trim(coalesce(body, '')) = '') ORDER BY comment_id"
     ).fetchall()
     for c in roots:
+        if repos is not None and c["repo"] not in repos:
+            continue
         replies = conn.execute(
             "SELECT * FROM gh_review_comments WHERE in_reply_to = ? ORDER BY created_at", (c["comment_id"],)
         ).fetchall()
@@ -483,6 +488,8 @@ def event_items(conn) -> tuple[list, list]:
         "SELECT * FROM gh_checks WHERE conclusion IN ('failure', 'timed_out') AND failure_log IS NOT NULL "
         "AND coalesce(app, '') != 'entire' ORDER BY check_id"
     ):
+        if repos is not None and c["repo"] not in repos:
+            continue
         head = f"## CI check: {c['name']} ({c['conclusion']})\n\n## Failure log (tail)\n"
         state = head + (c["failure_log"] or "")[-(STATE_CAP - len(head)):]
         checks.append(item("event_labels", ("check_failure", c["check_id"]), state,
@@ -742,15 +749,23 @@ def main(argv: list[str] | None = None) -> None:
     key = os.environ.get("OPENROUTER_API_KEY", "")
     conn = connect()
 
+    # Only picked projects are labeled; labels already stored for the others stay as they are.
+    picked = set(projects())
+    if not picked:
+        print("no projects picked: nothing to label. `debrief sync` lists the projects; "
+              "`debrief sync --project DIR` picks one.")
+        return
+    in_picked = {s for s, p in session_projects(conn).items() if p in picked}
+    picked_repos = {r for r, p in repo_projects(conn).items() if p in picked}
     kinds: dict[str, list] = {}
     if args.only in (None, "turns", "sessions"):
-        turns, tails, sessions = session_items(conn, args.session)
+        turns, tails, sessions = session_items(conn, args.session, in_picked)
         if args.only != "sessions":
             kinds |= {"turns": turns, "tails": tails}
         if args.only != "turns":
             kinds["sessions"] = sessions
     if args.only in (None, "events") and not args.session:
-        kinds["review_comments"], kinds["check_failures"] = event_items(conn)
+        kinds["review_comments"], kinds["check_failures"] = event_items(conn, picked_repos)
 
     for kind, items in kinds.items():
         for it in items:
