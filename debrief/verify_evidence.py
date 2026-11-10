@@ -16,7 +16,6 @@ Ideas that already have check rows are skipped unless --force.
 
 import argparse
 import json
-import os
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,11 +23,10 @@ from datetime import UTC, datetime
 
 from dotenv import load_dotenv
 
+from debrief.config import choose
 from debrief.db import connect
 from debrief.export_site import labels_by_turn, ref_id, resolve
 from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json
-
-MODEL = "claude-sonnet-5"
 
 SYSTEM = """You check evidence for one idea from a report on how a developer or a team works with AI coding
 agents. The idea names a specific problem. It cites items: human messages in agent sessions (with the agent
@@ -118,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
     if not shutil.which("claude"):
         sys.exit("claude (Claude Code) is not on PATH")
 
-    model = os.environ.get("VERIFY_MODEL") or MODEL
+    _, model = choose("verify")
     now = datetime.now(UTC).isoformat()
     cost, kept, total = 0.0, 0, 0
     with ThreadPoolExecutor(max_workers=args.parallel) as pool:

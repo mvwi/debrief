@@ -31,6 +31,7 @@ STAGES = {
     "entire-load": "normalize",
     "github": "github",
     "prune": "prune",
+    "config": "config",
 }
 
 
@@ -46,26 +47,28 @@ def sync(argv: list[str]) -> None:
     p.add_argument("--import", dest="import_dirs", action="append", default=[], metavar="DIR",
                    help="Also load a folder of JSONL logs (repeatable)")
     p.add_argument("--include-headless", action="store_true", help="Also load scripted runs (claude -p, SDK jobs)")
-    p.add_argument("--llm", choices=["claude-code", "openrouter"], default="claude-code",
-                   help="claude-code: `claude -p` on your Claude subscription (default); openrouter: needs OPENROUTER_API_KEY")
+    p.add_argument("--llm", choices=["claude-code", "openrouter"],
+                   help="Use this for labeling and synthesis, whatever config.toml says. "
+                        "claude-code: `claude -p` on your Claude subscription; openrouter: needs OPENROUTER_API_KEY")
     p.add_argument("--dry-run", action="store_true", help="Ingest, then print what labeling would cost; no model calls")
     args = p.parse_args(argv)
 
     ingest = [f"--{k}={v}" for k, v in (("project", args.project), ("since", args.since)) if v]
     ingest += [f"--import={d}" for d in args.import_dirs] + ["--include-headless"] * args.include_headless
     since = [f"--since={args.since}"] if args.since else []
+    llm = [f"--llm={args.llm}"] if args.llm else []
 
     stage("ingest", ingest)
     if args.dry_run:
         # The label dry run also prints sample prompts; keep only its count and estimate.
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            stage("label", [f"--llm={args.llm}", "--dry-run"])
+            stage("label", [*llm, "--dry-run"])
         lines = out.getvalue().splitlines()
         print("\n".join(line for line in lines if line.startswith(("== ", "=== ", "would label"))))
         return
-    stage("label", [f"--llm={args.llm}"])
-    stage("synthesize", [f"--llm={args.llm}", *since])
+    stage("label", llm)
+    stage("synthesize", [*llm, *since])
     stage("recommend", [])
     stage("export", since)
     print("\nDone. Run `debrief open` to read the report.")

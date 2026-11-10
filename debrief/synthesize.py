@@ -43,6 +43,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+from debrief.config import choose
 from debrief.db import connect
 from debrief.paths import BUNDLE_DIR
 from debrief.relay import is_relayed
@@ -50,8 +51,6 @@ from debrief.relay import is_relayed
 INDEX_PATH = BUNDLE_DIR / "index.json"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
-DEFAULT_MODEL = "anthropic/claude-opus-5.5"  # OpenRouter id
-CLAUDE_CODE_MODEL = "claude-opus-5-5"  # Claude Code id for the same model
 CLAUDE_CODE_TIMEOUT = 900  # seconds per call
 CLAUDE_CODE_RETRIES = (30, 120)  # backoff before each retry, for rate and usage limits
 MAX_TOKENS = 8000
@@ -834,8 +833,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--min-confidence", type=float, default=0.7, help="Ignore labels below this confidence")
     parser.add_argument("--max-evidence", type=int, default=40, help="Most evidence items per bundle")
     parser.add_argument("--since", default="", help="Ignore evidence before this ISO date (default: keep all)")
-    parser.add_argument("--llm", choices=["claude-code", "openrouter"], default="claude-code",
-                        help="claude-code: `claude -p` on the Claude subscription; openrouter: OpenRouter API")
+    parser.add_argument("--llm", choices=["claude-code", "openrouter"],
+                        help="claude-code: `claude -p` on the Claude subscription; openrouter: OpenRouter API. "
+                             "Default: [synthesize] in config.toml, else claude-code")
     parser.add_argument("--parallel", type=int,
                         help="Concurrent model calls (default 2 for claude-code, which shares subscription "
                              "limits; one per kind for openrouter)")
@@ -847,13 +847,9 @@ def main(argv: list[str] | None = None) -> None:
 
     conn = connect(args.db) if args.db else connect()
     mark_relayed(conn)
+    args.llm, model = choose("synthesize", args.llm)
     subscription = args.llm == "claude-code"
-    if subscription:
-        model = os.environ.get("CLAUDE_CODE_MODEL") or CLAUDE_CODE_MODEL
-        price = None
-    else:
-        model = os.environ.get("SYNTH_MODEL") or DEFAULT_MODEL
-        price = input_price(model)
+    price = None if subscription else input_price(model)
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out = BUNDLE_DIR / run_id
     out.mkdir(parents=True, exist_ok=True)

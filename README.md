@@ -26,7 +26,7 @@ Useful flags for `sync`:
     --since YYYY-MM-DD   only logs and evidence from this date on
     --import DIR         also load a folder of JSONL logs (Claude Code, Codex or Pi format)
     --include-headless   also load scripted runs (see below)
-    --llm openrouter     label with Jev through OpenRouter instead of Claude
+    --llm openrouter     label and synthesize through OpenRouter, whatever config.toml says
 
 A re-run only reads logs that changed and only labels turns that are new.
 
@@ -58,6 +58,20 @@ A re-run only reads logs that changed and only labels turns that are new.
 | Needs | a Claude subscription | an OpenRouter key |
 | Sends transcripts to | Anthropic, via your CLI | OpenRouter |
 | Confidence | the model's own estimate | token probabilities |
+
+| 2,774 items (236 sessions) | 33 min, no extra charge | about 3 min, about $0.37 |
+
+The Jev time and cost are scaled up from a 74-item run (4 s, $0.0098).
+
+To pick the model for each stage, write `~/.local/share/debrief/config.toml`:
+
+    [label]
+    llm = "openrouter"            # Jev: faster and closer to a careful reader, needs a key
+    [synthesize]
+    model = "claude-sonnet-5"     # optional; each llm has a default
+
+Stages are `label`, `synthesize`, `recommend` and `verify`. `debrief config` prints what each
+will use. A flag beats an environment variable, which beats the file.
 
 How they compare, measured on the prototype's data with no human-labeled set behind it:
 

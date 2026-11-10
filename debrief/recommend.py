@@ -12,7 +12,6 @@ listing several bugs may back one backlog recommendation per bug; any the model 
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sys
@@ -20,8 +19,9 @@ from datetime import UTC, datetime
 
 from dotenv import load_dotenv
 
+from debrief.config import choose
 from debrief.db import connect
-from debrief.synthesize import CLAUDE_CODE_MODEL, ClaudeCodeError, ask_claude_code, parse_json
+from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json
 
 LEVERS = {
     "agent_config": "Agent instructions: CLAUDE.md, AGENTS.md, skills, slash commands",
@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> None:
     if not shutil.which("claude"):
         sys.exit("claude (Claude Code) is not on PATH")
 
-    model = os.environ.get("CLAUDE_CODE_MODEL") or CLAUDE_CODE_MODEL
+    _, model = choose("recommend")
     try:
         raw, usage = ask_claude_code(user, model, system=SYSTEM,
                                      parse=lambda t: parse_json(t).get("recommendations", []))

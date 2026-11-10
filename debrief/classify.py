@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 import httpx
 from dotenv import load_dotenv
 
+from debrief.config import choose
 from debrief.db import connect
 from debrief.synthesize import ClaudeCodeError, ask_claude_code
 
@@ -50,7 +51,6 @@ OLD_TEXT_CAP = 400        # assistant texts older than the last two
 TAIL_TEXT_CAP = 1_500     # last assistant texts in session state
 WORKERS = 8
 PROGRESS_EVERY = 50       # Jev makes one call per item, so report progress every this many
-CLAUDE_MODEL = "claude-haiku-5-5"
 CLAUDE_WORKERS = 4        # concurrent `claude -p` calls
 BATCH_ITEMS = 10          # items per Claude call
 BATCH_CHARS = 60_000      # state chars per Claude call
@@ -730,19 +730,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--verbose", action="store_true",
                         help="Print a line per item with the start of its text, not just progress")
     parser.add_argument("--limit", type=int, help="At most N items of each kind")
-    parser.add_argument("--llm", choices=["openrouter", "claude-code"], default="openrouter",
-                        help="openrouter: Jev, billed per call. claude-code: `claude -p` on your subscription")
-    parser.add_argument("--model", help=f"Model ID (default {CLAUDE_MODEL} for claude-code, $JEV_MODEL for openrouter)")
+    parser.add_argument("--llm", choices=["openrouter", "claude-code"],
+                        help="openrouter: Jev, billed per call. claude-code: `claude -p` on your subscription. "
+                             "Default: [label] in config.toml, else claude-code")
+    parser.add_argument("--model", help="Model ID (default: config.toml, else Haiku for claude-code, Jev for openrouter)")
     parser.add_argument("--parallel", type=int, default=CLAUDE_WORKERS,
                         help="Concurrent claude -p calls (default %(default)s)")
     args = parser.parse_args(argv)
 
-    if args.llm == "claude-code":
-        model, key = args.model or CLAUDE_MODEL, ""
-    else:
-        load_dotenv()
-        model = args.model or os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
-        key = os.environ.get("OPENROUTER_API_KEY", "")
+    load_dotenv()
+    args.llm, model = choose("label", args.llm, args.model)
+    key = os.environ.get("OPENROUTER_API_KEY", "")
     conn = connect()
 
     kinds: dict[str, list] = {}
