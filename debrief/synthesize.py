@@ -187,17 +187,13 @@ def clean(item: dict) -> dict:
 # A PR is settled once merged or closed (db.settled_prs). CI and review rollups keep only
 # work whose PR is settled. The outcome rollup drops a session only while its PR is open:
 # a session with no linked PR (local logs, or work never pushed) stays in.
-SESSION_PR = """EXISTS (
-    SELECT 1 FROM checkpoints cp
-    JOIN gh_commit_prs g ON g.commit_sha = cp.commit_sha
-    WHERE cp.session_id = s.session_id)"""
+SESSION_PR = "EXISTS (SELECT 1 FROM session_pr_links l WHERE l.session_id = s.session_id)"
 SETTLED_SESSION = """EXISTS (
-    SELECT 1 FROM checkpoints cp
-    JOIN gh_commit_prs g ON g.commit_sha = cp.commit_sha
-    JOIN settled_prs sp ON sp.pr_number = g.pr_number
-    WHERE cp.session_id = s.session_id)"""
+    SELECT 1 FROM session_pr_links l
+    JOIN settled_prs sp ON sp.repo = l.repo AND sp.pr_number = l.pr_number
+    WHERE l.session_id = s.session_id)"""
 SETTLED_CHECK = """EXISTS (
-    SELECT 1 FROM gh_commit_prs g JOIN settled_prs sp ON sp.pr_number = g.pr_number
+    SELECT 1 FROM gh_commit_prs g JOIN settled_prs sp ON sp.repo = g.repo AND sp.pr_number = g.pr_number
     WHERE g.commit_sha = k.commit_sha)"""
 
 # Checks that say nothing about the code. The Entire GitHub App's check is an approval gate
@@ -485,8 +481,8 @@ def ci(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
         SELECT k.check_id, k.name, k.commit_sha, k.failure_log, k.flaky, k.settled,
             {event_label_sql('check_failure', 'failure_class').format(id='k.check_id')} AS failure_class,
             {event_label_sql('check_failure', 'failure_class', 'confidence').format(id='k.check_id')} AS _p,
-            (SELECT GROUP_CONCAT(pr_number) FROM gh_commit_prs cp WHERE cp.commit_sha = k.commit_sha) AS prs,
-            (SELECT GROUP_CONCAT(DISTINCT session_id) FROM checkpoints cp WHERE cp.commit_sha = k.commit_sha) AS sessions
+            (SELECT GROUP_CONCAT(repo || '#' || pr_number) FROM gh_commit_prs cp WHERE cp.commit_sha = k.commit_sha) AS prs,
+            (SELECT GROUP_CONCAT(DISTINCT session_id) FROM session_commits sc WHERE sc.commit_sha = k.commit_sha) AS sessions
         FROM ci_fails k
         ORDER BY k.check_id""", {"c": c, "since": since})
     unsettled = sum(not f["settled"] for f in fails)
@@ -518,12 +514,12 @@ def ci(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
 def review(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
     """Review comments on settled PRs by whether they held up, bot vs human, with thread state."""
     comments = rows(conn, f"""
-        SELECT rc.comment_id, rc.pr_number, rc.author, rc.is_bot, rc.path, rc.body,
+        SELECT rc.comment_id, rc.repo || '#' || rc.pr_number AS pr, rc.author, rc.is_bot, rc.path, rc.body,
             rc.kind, rc.review_state, rc.is_resolved, rc.is_outdated,
             {event_label_sql('review_comment', 'held_up').format(id='rc.comment_id')} AS held_up,
             {event_label_sql('review_comment', 'held_up', 'confidence').format(id='rc.comment_id')} AS _p,
             {event_label_sql('review_comment', 'comment_type').format(id='rc.comment_id')} AS comment_type,
-            rc.pr_number IN (SELECT pr_number FROM settled_prs) AS settled
+            EXISTS (SELECT 1 FROM settled_prs sp WHERE sp.repo = rc.repo AND sp.pr_number = rc.pr_number) AS settled
         FROM gh_review_comments rc
         WHERE rc.in_reply_to IS NULL AND COALESCE(rc.created_at, '') >= :since
         ORDER BY rc.comment_id""", {"c": c, "since": since})
@@ -545,7 +541,7 @@ def review(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
         w.setdefault(kind, {})[outcome] = w.setdefault(kind, {}).get(outcome, 0) + 1
         w["comment_type"][ctype] = w["comment_type"].get(ctype, 0) + 1
         groups.setdefault(f"{who}/{kind}/{outcome}", []).append(
-            {"event_type": "review_comment", "event_id": r["comment_id"], "pr": r["pr_number"],
+            {"event_type": "review_comment", "event_id": r["comment_id"], "pr": r["pr"],
              "author": r["author"], "review_state": r["review_state"],
              "is_resolved": r["is_resolved"], "is_outdated": r["is_outdated"], "path": r["path"],
              "comment_type": ctype, "body": excerpt(r["body"], 300), "_p": r["_p"]})
@@ -553,7 +549,7 @@ def review(conn: sqlite3.Connection, c: float, n: int, since: str) -> dict:
     shown = {ref_key(x) for x in pick([ranked(g) for g in groups.values()], n, lambda x: x["pr"])}
     examples = {k: [clean(x) for x in g if ref_key(x) in shown] for k, g in groups.items()}
     totals = {"items": len(comments), "shown": len(shown), "comments": len(comments),
-              "prs": len({r["pr_number"] for r in comments}), "excluded_unsettled": unsettled}
+              "prs": len({r["pr"] for r in comments}), "excluded_unsettled": unsettled}
     return {"totals": totals, "counts": counts, "examples": {k: v for k, v in examples.items() if v}}
 
 

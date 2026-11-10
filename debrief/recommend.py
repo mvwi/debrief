@@ -99,12 +99,12 @@ def evidence_stats(conn, evidence: list[dict]) -> dict:
     for e in evidence:
         if e.get("event_type") == "check_failure":
             sessions |= {r[0] for r in conn.execute(
-                "SELECT DISTINCT cp.session_id FROM gh_checks k JOIN checkpoints cp ON cp.commit_sha = k.commit_sha "
+                "SELECT DISTINCT cp.session_id FROM gh_checks k JOIN session_commits cp ON cp.commit_sha = k.commit_sha "
                 "WHERE k.check_id = ?", (e["event_id"],))}
         elif e.get("event_type") == "review_comment":
             sessions |= {r[0] for r in conn.execute(
-                "SELECT DISTINCT cp.session_id FROM gh_review_comments c "
-                "JOIN gh_commit_prs g ON g.pr_number = c.pr_number JOIN checkpoints cp ON cp.commit_sha = g.commit_sha "
+                "SELECT DISTINCT l.session_id FROM gh_review_comments c "
+                "JOIN session_pr_links l ON l.repo = c.repo AND l.pr_number = c.pr_number "
                 "WHERE c.comment_id = ?", (e["event_id"],))}
     people = {r[0] for s in sessions for r in conn.execute(
         "SELECT author FROM sessions WHERE session_id = ? AND author IS NOT NULL", (s,))}

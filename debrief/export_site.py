@@ -27,6 +27,7 @@ from debrief.recommend import LEVERS
 from debrief.relay import is_relayed
 
 MIN_CONF = 0.7          # same default as synthesize.py
+PR_KEY = "p.repo || '#' || p.pr_number"  # how the export names a PR: owner/name#12; p is the PR row
 SUBTYPE_CONF = 0.5      # correction_type on a turn already labeled a correction
 MSG_CAP = 8_000         # chars of message text in a session file
 TOOL_IN_CAP = 300
@@ -200,9 +201,9 @@ def resolve_check(conn, check_id: int) -> dict:
     c = conn.execute("SELECT * FROM gh_checks WHERE check_id = ?", (check_id,)).fetchone()
     if not c:
         return {"type": "missing"}
-    prs = [r[0] for r in conn.execute("SELECT pr_number FROM gh_commit_prs WHERE commit_sha = ?", (c["commit_sha"],))]
+    prs = [r[0] for r in conn.execute(f"SELECT {PR_KEY} FROM gh_commit_prs p WHERE commit_sha = ?", (c["commit_sha"],))]
     sessions = [r[0] for r in conn.execute(
-        "SELECT DISTINCT session_id FROM checkpoints WHERE commit_sha = ?", (c["commit_sha"],))]
+        "SELECT DISTINCT session_id FROM session_commits WHERE commit_sha = ?", (c["commit_sha"],))]
     return {"type": "check", "check_id": check_id, "name": c["name"], "conclusion": c["conclusion"],
             "failure_class": event_label(conn, "check_failure", check_id, "failure_class"),
             "commit": (c["commit_sha"] or "")[:10], "prs": prs, "sessions": sessions,
@@ -214,10 +215,10 @@ def resolve_review(conn, comment_id: int) -> dict:
     if not c:
         return {"type": "missing"}
     sessions = [r[0] for r in conn.execute(
-        "SELECT DISTINCT cp.session_id FROM gh_commit_prs g JOIN checkpoints cp ON cp.commit_sha = g.commit_sha "
-        "WHERE g.pr_number = ?", (c["pr_number"],))]
+        "SELECT DISTINCT session_id FROM session_pr_links WHERE repo = ? AND pr_number = ?",
+        (c["repo"], c["pr_number"]))]
     return {"type": "review", "comment_id": comment_id, "sessions": sessions, "author": c["author"],
-            "is_bot": bool(c["is_bot"]), "kind": c["kind"], "path": c["path"], "line": c["line"], "pr": c["pr_number"],
+            "is_bot": bool(c["is_bot"]), "kind": c["kind"], "path": c["path"], "line": c["line"], "pr": f"{c['repo']}#{c['pr_number']}",
             "body": excerpt(c["body"], 600), "resolved": c["is_resolved"], "outdated": c["is_outdated"],
             "comment_type": event_label(conn, "review_comment", comment_id, "comment_type"),
             "held_up": event_label(conn, "review_comment", comment_id, "held_up")}
@@ -274,17 +275,17 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
     for r in conn.execute("SELECT session_id, field, value, confidence FROM session_labels"):
         slabels[r[0]][r[1]] = r[2] if (r[3] or 0) >= 0.5 or r[1].endswith("_score") else None
     prs: dict[str, list] = defaultdict(list)
-    for r in conn.execute("""
-        SELECT DISTINCT k.session_id, p.pr_number, CASE WHEN p.merged = 1 THEN 'merged' ELSE p.state END
-        FROM checkpoints k JOIN gh_commit_prs cp ON cp.commit_sha = k.commit_sha
-        JOIN gh_prs p ON p.pr_number = cp.pr_number ORDER BY p.pr_number"""):
+    for r in conn.execute(f"""
+        SELECT l.session_id, {PR_KEY}, CASE WHEN p.merged = 1 THEN 'merged' ELSE p.state END
+        FROM session_pr_links l JOIN gh_prs p ON p.repo = l.repo AND p.pr_number = l.pr_number
+        ORDER BY p.repo, p.pr_number"""):
         prs[r[0]].append({"n": r[1], "state": r[2]})
     tools = {r[0]: (r[1], r[2] or 0) for r in conn.execute(
         "SELECT session_id, COUNT(*), SUM(is_error) FROM tool_calls GROUP BY session_id")}
     # app 'entire' is Entire's approval gate, which fails until a person approves: not a CI failure.
     ci_fail = dict(conn.execute("""
         SELECT cp.session_id, COUNT(DISTINCT k.check_id) FROM gh_checks k
-        JOIN checkpoints cp ON cp.commit_sha = k.commit_sha
+        JOIN session_commits cp ON cp.commit_sha = k.commit_sha
         WHERE k.conclusion = 'failure' AND COALESCE(k.app, '') != 'entire'
         GROUP BY cp.session_id"""))
     turns_by_session: dict[str, list] = defaultdict(list)
@@ -409,45 +410,46 @@ def failure_places(log: str | None) -> dict:
 
 def ci_section(conn, since: str) -> dict:
     """Failed runs on settled PRs that finished inside the window."""
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT k.check_id, k.name, k.failure_log, k.completed_at,
             (SELECT value FROM event_labels l WHERE l.event_type = 'check_failure' AND l.event_id = k.check_id
                AND l.field = 'failure_class') AS class,
             EXISTS (SELECT 1 FROM gh_checks s WHERE s.commit_sha = k.commit_sha AND s.name = k.name
                     AND s.conclusion = 'success' AND s.completed_at > k.completed_at) AS flaky,
-            (SELECT MIN(g.pr_number) FROM gh_commit_prs g JOIN settled_prs sp ON sp.pr_number = g.pr_number
-             WHERE g.commit_sha = k.commit_sha) AS pr
+            (SELECT {PR_KEY} FROM gh_commit_prs g JOIN settled_prs p ON p.repo = g.repo AND p.pr_number = g.pr_number
+             WHERE g.commit_sha = k.commit_sha ORDER BY g.pr_number LIMIT 1) AS pr
         FROM gh_checks k
         WHERE k.conclusion = 'failure' AND COALESCE(k.app, '') != 'entire'
           AND k.completed_at >= ?""", (since,)).fetchall()
     # Completed check runs per settled PR, so the site can scope failure rates to a set of sessions.
-    runs = dict(conn.execute("""
-        SELECT g.pr_number, COUNT(DISTINCT k.check_id) FROM gh_checks k
-        JOIN gh_commit_prs g ON g.commit_sha = k.commit_sha JOIN settled_prs sp ON sp.pr_number = g.pr_number
+    runs = dict(conn.execute(f"""
+        SELECT {PR_KEY}, COUNT(DISTINCT k.check_id) FROM gh_checks k
+        JOIN gh_commit_prs g ON g.commit_sha = k.commit_sha
+        JOIN settled_prs p ON p.repo = g.repo AND p.pr_number = g.pr_number
         WHERE k.conclusion IS NOT NULL AND COALESCE(k.app, '') != 'entire'
           AND k.completed_at >= ?
-        GROUP BY g.pr_number""", (since,)))
+        GROUP BY 1""", (since,)))
     failures = [{"id": r[0], "name": r[1], "at": r[3], "class": r[4], "flaky": bool(r[5]), "pr": r[6],
                  **failure_places(r[2])} for r in rows if r[6] is not None]
     return {"runs_by_pr": runs, "failures": failures}
 
 
 def review_section(conn) -> list[dict]:
-    rows = conn.execute("""
-        SELECT c.comment_id, c.author, c.is_bot, c.kind, c.pr_number, c.is_resolved, c.is_outdated, c.path,
+    rows = conn.execute(f"""
+        SELECT c.comment_id, c.author, c.is_bot, c.kind, {PR_KEY}, c.is_resolved, c.is_outdated, c.path,
             (SELECT value FROM event_labels l WHERE l.event_type = 'review_comment' AND l.event_id = c.comment_id
                AND l.field = 'comment_type') AS type,
             (SELECT value FROM event_labels l WHERE l.event_type = 'review_comment' AND l.event_id = c.comment_id
                AND l.field = 'held_up') AS held
-        FROM gh_review_comments c
-        WHERE c.in_reply_to IS NULL AND c.pr_number IN (SELECT pr_number FROM settled_prs)""").fetchall()
+        FROM gh_review_comments c JOIN settled_prs p ON p.repo = c.repo AND p.pr_number = c.pr_number
+        WHERE c.in_reply_to IS NULL""").fetchall()
     return [{"id": r[0], "author": r[1], "bot": bool(r[2]), "kind": r[3], "pr": r[4], "resolved": r[5],
              "outdated": r[6], "path": r[7] or None, "type": r[8], "held": r[9]} for r in rows]
 
 
 def prs_section(conn) -> dict:
     return {r[0]: {"title": r[1], "state": "merged" if r[3] else r[2], "url": r[4]}
-            for r in conn.execute("SELECT pr_number, title, state, merged, url FROM gh_prs")}
+            for r in conn.execute(f"SELECT {PR_KEY}, title, state, merged, url FROM gh_prs p")}
 
 
 def session_file(conn, labels, sid: str) -> dict:
@@ -517,10 +519,11 @@ def volume(conn, ids: set[str]) -> dict:
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS window_sessions (session_id TEXT PRIMARY KEY)")
     conn.execute("DELETE FROM window_sessions")
     conn.executemany("INSERT INTO window_sessions VALUES (?)", [(i,) for i in ids])
-    # PRs, checks and review comments reach the window through the sessions' checkpoint commits.
-    prs = ("SELECT DISTINCT g.pr_number FROM checkpoints cp JOIN gh_commit_prs g ON g.commit_sha = cp.commit_sha "
-           "WHERE cp.session_id IN (SELECT session_id FROM window_sessions)")
-    checks = f"SELECT k.* FROM gh_checks k JOIN gh_commit_prs g ON g.commit_sha = k.commit_sha WHERE g.pr_number IN ({prs})"
+    # PRs, checks and review comments reach the window through the sessions' PRs.
+    prs = ("SELECT DISTINCT repo, pr_number FROM session_pr_links "
+           "WHERE session_id IN (SELECT session_id FROM window_sessions)")
+    checks = (f"SELECT k.* FROM gh_checks k JOIN gh_commit_prs g ON g.commit_sha = k.commit_sha "
+              f"WHERE (g.repo, g.pr_number) IN ({prs})")
     in_window = "session_id IN (SELECT session_id FROM window_sessions)"
 
     def one(sql: str) -> int:
@@ -532,16 +535,16 @@ def volume(conn, ids: set[str]) -> dict:
         "prs": one(f"SELECT COUNT(*) FROM ({prs})"),
         "checks": one(f"SELECT COUNT(DISTINCT check_id) FROM ({checks})"),
         "check_failures": one(f"SELECT COUNT(DISTINCT check_id) FROM ({checks}) WHERE conclusion = 'failure'"),
-        "review_comments": one(f"SELECT COUNT(*) FROM gh_review_comments WHERE pr_number IN ({prs})"),
+        "review_comments": one(f"SELECT COUNT(*) FROM gh_review_comments WHERE (repo, pr_number) IN ({prs})"),
         "labels": one(f"SELECT (SELECT COUNT(*) FROM turn_labels WHERE {in_window}) "
                       f"+ (SELECT COUNT(*) FROM session_labels WHERE {in_window})"),
     }
 
 
 def repo_of(prs: dict) -> str | None:
-    """owner/name, read from a stored PR's URL; None without GitHub data."""
-    m = next((re.match(r"https://github\.com/([^/]+/[^/]+)/pull/", p["url"] or "") for p in prs.values()), None)
-    return m.group(1) if m else None
+    """owner/name when every PR is in one repo; None with several, or without GitHub data."""
+    repos = {key.rsplit("#", 1)[0] for key in prs}
+    return repos.pop() if len(repos) == 1 else None
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -11,7 +11,7 @@ const METHOD = {
       id: "collect", title: "Collect the sessions", short: "Collect", glance: ["{sessions}", "sessions"],
       lede: "Read the agent sessions into one local database.",
       text: [
-        "- {sessions} sessions that started between {from} and {to}.\n- [github] Each session's commits link it to its PR in {repo}, so CI runs and review comments trace back to the session that wrote the code.",
+        "- {sessions} sessions that started between {from} and {to}.\n- [github] Each session is linked to its pull requests on GitHub: by its commits, or by the PR links and pushed branches in its own log. CI runs and review comments trace back to the session that wrote the code.",
       ],
       facts: [["{messages}", "messages"], ["{tool_calls}", "tool calls"], ["{prs}", "PRs"], ["{checks}", "CI runs"], ["{review_comments}", "review comments"]],
     },

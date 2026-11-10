@@ -50,7 +50,9 @@ def sync(argv: list[str]) -> None:
     p.add_argument("--llm", choices=["claude-code", "openrouter"],
                    help="Use this for labeling and synthesis, whatever config.toml says. "
                         "claude-code: `claude -p` on your Claude subscription; openrouter: needs OPENROUTER_API_KEY")
-    p.add_argument("--dry-run", action="store_true", help="Ingest, then print what labeling would cost; no model calls")
+    p.add_argument("--no-github", action="store_true", help="Do not ask GitHub about your sessions' pull requests")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Ingest, then print what labeling would cost; no model calls, no GitHub requests")
     args = p.parse_args(argv)
 
     ingest = [f"--{k}={v}" for k, v in (("project", args.project), ("since", args.since)) if v]
@@ -59,6 +61,15 @@ def sync(argv: list[str]) -> None:
     llm = [f"--llm={args.llm}"] if args.llm else []
 
     stage("ingest", ingest)
+    from debrief import config  # here, not at the top: the rest of this file is being edited elsewhere
+    off = "--no-github" if args.no_github else None if config.github_enabled() else "[github] enabled = false in config.toml"
+    if off:
+        print(f"\ngithub: skipped, {off}")
+    else:
+        try:
+            stage("github", ["--dry-run"] * args.dry_run)
+        except RuntimeError as e:  # a failed gh call; the report builds without GitHub data
+            print(f"github: skipped, {str(e).splitlines()[0]}")
     if args.dry_run:
         # The label dry run also prints sample prompts; keep only its count and estimate.
         out = io.StringIO()

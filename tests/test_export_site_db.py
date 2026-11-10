@@ -69,16 +69,16 @@ def with_github(conn) -> None:
     conn.execute("UPDATE sessions SET author = 'bob' WHERE session_id = 's2'")
     conn.execute("INSERT INTO checkpoints (checkpoint_id, session_id, commit_sha, ts) "
                  "VALUES ('c1', 's1', 'abc1234', '2026-01-05T10:30:00Z')")
-    conn.execute("INSERT INTO gh_prs (pr_number, title, state, merged, url) "
-                 "VALUES (7, 'Fix build', 'closed', 1, 'https://github.com/acme/widgets/pull/7')")
-    conn.execute("INSERT INTO gh_commit_prs VALUES ('abc1234', 7)")
+    conn.execute("INSERT INTO gh_prs (repo, pr_number, title, state, merged, url) "
+                 "VALUES ('acme/widgets', 7, 'Fix build', 'closed', 1, 'https://github.com/acme/widgets/pull/7')")
+    conn.execute("INSERT INTO gh_commit_prs (commit_sha, repo, pr_number) VALUES ('abc1234', 'acme/widgets', 7)")
     log = "x\nFAIL\tgithub.com/acme/widgets/pkg/build\t0.3s\n/home/runner/work/widgets/widgets/pkg/build/run.go:12: boom\n"
     conn.executemany(
         "INSERT INTO gh_checks (check_id, commit_sha, name, conclusion, app, completed_at, failure_log) "
         "VALUES (?, 'abc1234', ?, 'failure', ?, '2026-01-05T10:40:00Z', ?)",
         [(1, "test", "github-actions", log), (2, "gate", "entire", None)])
-    conn.execute("INSERT INTO gh_review_comments (comment_id, pr_number, author, is_bot, path, body, kind) "
-                 "VALUES (9, 7, 'bot', 1, 'pkg/build/run.go', 'nit', 'inline')")
+    conn.execute("INSERT INTO gh_review_comments (comment_id, repo, pr_number, author, is_bot, path, body, kind) "
+                 "VALUES (9, 'acme/widgets', 7, 'bot', 1, 'pkg/build/run.go', 'nit', 'inline')")
     conn.execute("INSERT INTO turn_labels (session_id, msg_idx, field, value, confidence) "
                  "VALUES ('s1', 2, 'turn_kind', 'correction', 0.9)")
     conn.execute("INSERT INTO findings (run_id, kind, title, evidence) VALUES ('r1', 'ci', 'Build breaks', ?)",
@@ -93,7 +93,7 @@ def test_with_github(tmp_path):
     assert meta["has"] == {"github": True, "people": True, "checkpoints": True, "projects": True, "labels": True}
     assert meta["repo"] == "acme/widgets" and meta["run_id"] == "r1"
     s1 = next(s for s in index["sessions"] if s["id"] == "s1")
-    assert s1["prs"] == [{"n": 7, "state": "merged"}] and s1["settled"] and s1["corrections"] == 1
+    assert s1["prs"] == [{"n": "acme/widgets#7", "state": "merged"}] and s1["settled"] and s1["corrections"] == 1
     # A job named "test" counts; the approval gate does not. The Go module and checkout dir are not hard-coded.
     assert s1["ci_failures"] == 1
     assert [(f["name"], f["area"], f["files"]) for f in index["ci"]["failures"]] == [("test", "pkg/build", ["pkg/build/run.go"])]
