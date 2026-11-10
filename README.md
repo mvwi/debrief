@@ -58,7 +58,6 @@ A re-run only reads logs that changed and only labels turns that are new.
 | Needs | a Claude subscription | an OpenRouter key |
 | Sends transcripts to | Anthropic, via your CLI | OpenRouter |
 | Confidence | the model's own estimate | token probabilities |
-
 | 2,774 items (236 sessions) | 33 min, no extra charge | about 3 min, about $0.37 |
 
 The Jev time and cost are scaled up from a 74-item run (4 s, $0.0098).
