@@ -1,12 +1,15 @@
-"""Write the insights site's data: site/data/index.json plus one JSON file per session.
+"""Build the debrief site: copy the static files to SITE_OUT and write its data beside them.
 
-index.json holds everything the overview pages need (recommendations, findings, resolved
+data/index.json holds everything the overview pages need (recommendations, findings, resolved
 evidence, per-session stats, flagged turns, CI and review rows, skill uses). Session
-transcripts load on demand from shard files, site/data/sessions/sNN.json, each a JSON object
+transcripts load on demand from shard files, data/sessions/sNN.json, each a JSON object
 of {session_id: transcript}; each session in index.json names its shard.
 
+Every table but sessions and messages may be empty. meta.has tells the site which optional
+data exists (GitHub, people, checkpoints, projects, labels) so it can hide the rest.
+
     uv run python -m debrief.export_site
-    uv run python -m debrief.export_site --run 20260925T182434Z
+    uv run python -m debrief.export_site --run 20260925T182434Z --since 2026-08-11
 """
 
 import argparse
@@ -19,7 +22,7 @@ from datetime import UTC, datetime
 
 from debrief import skills
 from debrief.db import connect
-from debrief.paths import HOME, SITE_OUT, SITE_SRC
+from debrief.paths import SITE_OUT, SITE_SRC
 from debrief.recommend import LEVERS
 from debrief.relay import is_relayed
 
@@ -39,10 +42,6 @@ SIGNALS = {
     "not_filed": ("found_not_filed", "true"),
 }
 CORRECTING = ("correction", "reversal", "defect")  # together, the site's "Agent corrected"
-
-# Window the sample came from; scrape.py logs it on each run.
-SCRAPE_LOG = HOME / "scrape.log"
-
 
 # Secret-shaped strings, redacted from the serialized JSON before it's written (the site is public).
 # Patterns stop at quotes and backslashes so a redaction can't break the JSON around it.
@@ -72,14 +71,6 @@ def excerpt(text, n: int) -> str:
 def tail(text, n: int) -> str:
     text = str(text or "").strip()
     return text if len(text) <= n else "…" + text[-n:]
-
-
-def window_total() -> int | None:
-    try:
-        m = re.search(r"(\d+) sessions in window", SCRAPE_LOG.read_text())
-    except FileNotFoundError:
-        return None
-    return int(m.group(1)) if m else None
 
 
 def labels_by_turn(conn) -> dict[tuple, dict]:
@@ -223,10 +214,11 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
         prs[r[0]].append({"n": r[1], "state": r[2]})
     tools = {r[0]: (r[1], r[2] or 0) for r in conn.execute(
         "SELECT session_id, COUNT(*), SUM(is_error) FROM tool_calls GROUP BY session_id")}
+    # app 'entire' is Entire's approval gate, which fails until a person approves: not a CI failure.
     ci_fail = dict(conn.execute("""
         SELECT cp.session_id, COUNT(DISTINCT k.check_id) FROM gh_checks k
         JOIN checkpoints cp ON cp.commit_sha = k.commit_sha
-        WHERE k.conclusion = 'failure' AND COALESCE(k.app, '') != 'entire' AND k.name != 'test'
+        WHERE k.conclusion = 'failure' AND COALESCE(k.app, '') != 'entire'
         GROUP BY cp.session_id"""))
     turns_by_session: dict[str, list] = defaultdict(list)
     for r in conn.execute("SELECT session_id, idx, text, ts FROM messages "
@@ -236,8 +228,10 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
     first_ts = dict(conn.execute("SELECT session_id, MIN(ts) FROM messages WHERE ts IS NOT NULL GROUP BY session_id"))
 
     sessions, flagged = [], []
-    for s in conn.execute("SELECT * FROM sessions WHERE last_activity_at >= ? ORDER BY started_at", (since,)):
+    for s in conn.execute("SELECT * FROM sessions WHERE COALESCE(last_activity_at, started_at, '') >= ? "
+                          "ORDER BY started_at", (since,)):
         sid = s["session_id"]
+        started = first_ts.get(sid) or s["started_at"] or s["last_activity_at"]
         kinds: Counter = Counter()
         friction = []
         for t in turns_by_session.get(sid, []):
@@ -255,7 +249,9 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
         pr_list = prs.get(sid, [])
         sessions.append({
             "id": sid, "name": s["display_name"], "agent": s["agent"], "model": s["model"],
-            "author": s["author"] or None, "started": first_ts.get(sid) or s["started_at"], "last": s["last_activity_at"],
+            "author": s["author"] or None, "started": started, "last": s["last_activity_at"] or started,
+            # The folder the session ran in; the site shows its last part and filters on the whole path.
+            "project": s["cwd"] or None,  # db.connect adds the column to old databases
             "human_turns": len(turns_by_session.get(sid, [])), "turn_kinds": dict(kinds),
             "corrections": count["correction"], "reversals": count["reversal"], "defects": count["defect"],
             "could_find": count["could_find"], "not_filed": len(not_filed), "friction": friction,
@@ -272,6 +268,8 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
 
 def hotspot_files(conn, labels, ids: set[str]) -> list[dict]:
     """Repo files the agent wrote in the stretch before a correction, reversal or caught defect, in sessions `ids`."""
+    # shortcut: paths are relative to each session's repo, so src/ in two repos counts as one place.
+    # sessions.cwd can't split them: worktrees of one repo have different cwds. Split once sessions name their repo.
     files: dict[str, dict] = {}
     rows = conn.execute("""
         SELECT m.session_id, m.idx,
@@ -295,13 +293,14 @@ def hotspot_files(conn, labels, ids: set[str]) -> list[dict]:
 
 
 # Where a failed CI run broke, read from the tail of its log.
-MODULE = "github.com/entireio/cli"
-PKG_RE = re.compile(rf"^FAIL\s+({re.escape(MODULE)}\S*)", re.MULTILINE)  # go test: FAIL<tab>pkg<tab>1.2s
+PKG_RE = re.compile(r"^FAIL[ \t]+([\w.-]+\.[a-z]+/\S+)", re.MULTILINE)  # go test: FAIL<tab>host/owner/repo/pkg<tab>1.2s
+MODULE_RE = re.compile(r"^[\w.-]+\.[a-z]+/[^/]+/[^/]+")  # a Go module path: host/owner/repo
 GOTESTSUM_RE = re.compile(r"^=== FAIL: (\S+)(?: (Test\S+))?", re.MULTILINE)  # gotestsum: === FAIL: pkg TestX
 TEST_RE = re.compile(r"^\s*--- FAIL: (Test\S+)", re.MULTILINE)
 RERUN_RE = re.compile(r"^\s*mise run test:\S+ .*?(Test\w+)\s*$", re.MULTILINE)  # e2e report's rerun hints
 FILE_RE = re.compile(r"(?<![\w./\\@-])((?:[A-Za-z]:)?[\w./\\-]*?[\w-]+\.(?:go|sh|ps1|ya?ml)):\d+")
-RUNNER_RE = re.compile(r"^(?:/?home/runner/work/cli/cli/|[A-Za-z]:/a/cli/cli/)")  # checkout dirs, Linux and Windows
+# GitHub's checkout dirs, Linux and Windows: <work>/<repo>/<repo>/
+RUNNER_RE = re.compile(r"^(?:/?home/runner/work/([^/]+)/\1/|[A-Za-z]:/a/([^/]+)/\2/)")
 MAX_FILES = 5
 
 
@@ -315,7 +314,7 @@ def failure_places(log: str | None) -> dict:
             xs.append(x)
 
     def pkg(p: str) -> str:
-        p = p.removeprefix(MODULE).strip("/")
+        p = MODULE_RE.sub("", p).strip("/")
         return p or "(root)"
 
     for m in PKG_RE.finditer(log):
@@ -352,13 +351,13 @@ def ci_section(conn, since: str) -> dict:
             (SELECT MIN(g.pr_number) FROM gh_commit_prs g JOIN settled_prs sp ON sp.pr_number = g.pr_number
              WHERE g.commit_sha = k.commit_sha) AS pr
         FROM gh_checks k
-        WHERE k.conclusion = 'failure' AND COALESCE(k.app, '') != 'entire' AND k.name != 'test'
+        WHERE k.conclusion = 'failure' AND COALESCE(k.app, '') != 'entire'
           AND k.completed_at >= ?""", (since,)).fetchall()
     # Completed check runs per settled PR, so the site can scope failure rates to a set of sessions.
     runs = dict(conn.execute("""
         SELECT g.pr_number, COUNT(DISTINCT k.check_id) FROM gh_checks k
         JOIN gh_commit_prs g ON g.commit_sha = k.commit_sha JOIN settled_prs sp ON sp.pr_number = g.pr_number
-        WHERE k.conclusion IS NOT NULL AND COALESCE(k.app, '') != 'entire' AND k.name != 'test'
+        WHERE k.conclusion IS NOT NULL AND COALESCE(k.app, '') != 'entire'
           AND k.completed_at >= ?
         GROUP BY g.pr_number""", (since,)))
     failures = [{"id": r[0], "name": r[1], "at": r[3], "class": r[4], "flaky": bool(r[5]), "pr": r[6],
@@ -472,11 +471,18 @@ def volume(conn, ids: set[str]) -> dict:
     }
 
 
-def main() -> None:
+def repo_of(prs: dict) -> str | None:
+    """owner/name, read from a stored PR's URL; None without GitHub data."""
+    m = next((re.match(r"https://github\.com/([^/]+/[^/]+)/pull/", p["url"] or "") for p in prs.values()), None)
+    return m.group(1) if m else None
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", help="Findings run_id (default: latest with recommendations)")
-    parser.add_argument("--since", default="2026-08-11", help="Window start, as passed to scrape.py (default: %(default)s)")
-    args = parser.parse_args()
+    parser.add_argument("--since", default="", metavar="YYYY-MM-DD",
+                        help="Only sessions active since this date (default: all)")
+    args = parser.parse_args(argv)
 
     conn: sqlite3.Connection = connect()
     run_id = args.run or conn.execute("SELECT MAX(run_id) FROM recommendations").fetchone()[0] \
@@ -485,19 +491,28 @@ def main() -> None:
     findings, recs, refs = findings_and_recs(conn, labels, run_id)
     sessions, flagged = sessions_section(conn, labels, args.since)
     authors = {s["id"]: s["author"] for s in sessions}
+    projects = {s["id"]: s["project"] for s in sessions}
+    prs = prs_section(conn)
     for rec in recs:
         touched = {sid for e in rec["evidence"] for sid in evidence_sessions(refs[e])}
         rec["sessions"] = sorted(touched)
         rec["people"] = len({authors.get(s) for s in touched} - {None})
     started = [s["started"] for s in sessions if s["started"]]
+    vol = volume(conn, set(authors))
     index = {
         "meta": {"generated": datetime.now(UTC).isoformat(timespec="seconds"), "run_id": run_id,
-                 "from": args.since, "to": max(started), "sessions": len(sessions),
-                 "window_sessions": window_total(), "repo": "entireio/cli", "min_conf": MIN_CONF,
-                 "human_turns": sum(s["human_turns"] for s in sessions), **volume(conn, set(authors))},
+                 "from": args.since or min(started, default=None), "to": max(started, default=None),
+                 "sessions": len(sessions), "repo": repo_of(prs), "min_conf": MIN_CONF,
+                 "human_turns": sum(s["human_turns"] for s in sessions), **vol,
+                 # Optional data. The site hides pages, columns and tiles for whatever is False.
+                 "has": {"github": bool(prs),
+                         "people": len(set(authors.values()) - {None}) > 1,  # one person: nothing to compare
+                         "checkpoints": any(s["checkpoints"] for s in sessions),
+                         "projects": any(projects.values()),
+                         "labels": vol["labels"] > 0}},
         "levers": LEVERS, "recommendations": recs, "findings": findings, "refs": refs,
         "sessions": sessions, "flagged": flagged, "files": hotspot_files(conn, labels, set(authors))[:60],
-        "ci": ci_section(conn, args.since), "reviews": review_section(conn), "prs": prs_section(conn),
+        "ci": ci_section(conn, args.since), "reviews": review_section(conn), "prs": prs,
         "skills": skills_section(conn, set(authors)),
     }
     SITE_OUT.mkdir(parents=True, exist_ok=True)
@@ -523,7 +538,7 @@ def main() -> None:
         s["shard"] = shard_of[s["id"]]
     (out / "index.json").write_text(redact(json.dumps(index, ensure_ascii=False, separators=(",", ":")).replace("\ufffd", "")))
     size = sum(p.stat().st_size for p in out.rglob("*.json"))
-    print(f"run {run_id}: {len(recs)} recommendations, {len(findings)} findings, {len(sessions)} sessions "
+    print(f"run {run_id or '(none yet)'}: {len(recs)} recommendations, {len(findings)} findings, {len(sessions)} sessions "
           f"in {len(shards)} shards; {size / 1e6:.1f} MB in {out}")
 
 

@@ -18,21 +18,13 @@ const SIG_FIELD = { correction: "corrections", reversal: "reversals", could_find
 const CORRECTING = ["correction", "reversal", "defect"];
 // Glossary entry for each signal (method.js).
 const LABEL_FIELD = { correction: "turn_kind", reversal: "design_reversal", could_find: "agent_could_have_found_it", defect: "human_caught_defect", not_filed: "found_not_filed" };
-const LEVERS = {
-  agent_config: "Agent instructions",
-  test_harness: "Tests & dev loop",
-  ci_infra: "CI & infra",
-  review_tooling: "Review bots",
-  team_practice: "Team practice",
-  backlog: "Possible bugs",
-};
 const OUTCOMES = { shipped_or_pr_ready: "Shipped", partial: "Partial", abandoned: "Abandoned", investigation_only: "Investigation", unclear: "Unclear" };
 const TURN_KINDS = {
   question_to_agent: "Question to agent", new_request: "New request", approval_or_go_ahead: "Approval / go ahead",
   correction: "Correction", answer_to_agent_question: "Answer to agent", status_check: "Status check", other: "Other", unlabeled: "Unlabeled",
 };
 const PROMPT_STYLES = {
-  links_issue_or_pr: "Links issue, PR or trail", detailed_instructions: "Detailed instructions", pasted_spec: "Pasted spec",
+  links_issue_or_pr: "Links issue or PR", detailed_instructions: "Detailed instructions", pasted_spec: "Pasted spec",
   one_line_ask: "One-line ask", question: "Question", asks_for_plan_first: "Asks for a plan",
 };
 const CORRECTION_TYPES = {
@@ -52,7 +44,6 @@ const ICONS = {
   adoption: '<circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13.5c.5-2.5 2.3-3.8 4.5-3.8s4 1.3 4.5 3.8M11 3.2a2.3 2.3 0 010 4.6M12.5 10c1.2.5 1.9 1.7 2 3.5"/>',
   delivery: '<circle cx="4" cy="3.5" r="1.5"/><circle cx="4" cy="12.5" r="1.5"/><circle cx="12" cy="12.5" r="1.5"/><path d="M4 5v6M12 11V6.5a2 2 0 00-2-2H7M8.5 3L7 4.5 8.5 6"/>',
   sessions: '<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 6.5l2 1.5-2 1.5M8 9.5h3"/>',
-  next: '<path d="M2 8h10M8.5 4.5L12 8l-3.5 3.5"/><path d="M14 3v10"/>',
   method: '<path d="M3 2.5h7.5a2 2 0 012 2v9H5a2 2 0 01-2-2z"/><path d="M3 11.5a2 2 0 012-2h7.5M6 5.5h4"/>',
 };
 const PAGES = [
@@ -60,10 +51,9 @@ const PAGES = [
   { id: "recs", label: "Ideas" },
   { id: "corrections", label: "Corrections" },
   { id: "adoption", label: "Adoption" },
-  { id: "delivery", label: "CI & review" },
+  { id: "delivery", label: "CI & review", needs: "github" },
   { id: "sessions", label: "Sessions" },
   { id: "method", label: "How it works", secondary: true },
-  { id: "next", label: "Next steps", secondary: true },
 ];
 
 // ---------- state ----------
@@ -78,7 +68,7 @@ const state = {
   scope: { period: "all", agent: "" },
   recFilter: { q: "", lever: "", sort: "sessions", dir: -1 },
   correctionsFilter: { signal: "", ctype: "", dir: "" },
-  sessionFilter: { q: "", author: "", outcome: "", corrected: false, sort: "started", dir: -1 },
+  sessionFilter: { q: "", author: "", project: "", outcome: "", corrected: false, sort: "started", dir: -1 },
   evTab: "all",
   overviewGroup: "agent",
   lastPage: null,
@@ -127,13 +117,44 @@ function info(text, def) {
 const glyph = (sig) => `<span class="glyph ${sig}" aria-hidden="true"></span>`;
 const sigChip = (sig, extra = "") => `<span class="sig">${glyph(sig)}${esc(SIGNALS[sig].label)}${extra}</span>`;
 const outcomeChip = (o) => (o ? `<span class="outcome ${esc(o)}">${esc(OUTCOMES[o] || o)}</span>` : `<span class="muted">—</span>`);
-const lever = (k) => LEVERS[k] || k;
-const prUrl = (n) => state.data.prs[n]?.url || `https://github.com/${state.data.meta.repo}/pull/${n}`;
-const prLink = (n) => `<a href="${esc(prUrl(n))}" target="_blank" rel="noopener">#${n}</a>`;
+// Optional data (GitHub, people, checkpoints, projects, labels): the export says which exists, and
+// pages, columns and tiles for the rest stay hidden.
+const has = (k) => Boolean(state.data?.meta?.has?.[k]);
+const pages = () => PAGES.filter((p) => !p.needs || has(p.needs));
+// Lever keys and their descriptions come from the data. The label is the description up to its colon,
+// or the key in words when there is no short one.
+const lever = (k) => {
+  const desc = state.data.levers?.[k] || "";
+  const head = desc.split(":")[0];
+  return desc.includes(":") && head.length <= 32 ? head : String(k).replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+};
+const prLink = (n) => { const url = state.data.prs[n]?.url; return url ? `<a href="${esc(url)}" target="_blank" rel="noopener">#${n}</a>` : `#${n}`; };
+// "3 of 40 messages", or "No messages" rather than "0 of 0".
+const ofText = (a, b, unit) => (b ? `${fmt(a)} of ${fmt(b)} ${unit}` : `No ${unit}`);
 const sessionHref = (id, idx) => `#session~${id}${idx != null ? "~" + idx : ""}`;
 // Filter value for sessions whose harness didn't record who ran them.
 const NO_PERSON = "(no person)";
 const personLabel = (author, none = "Unknown") => (!author || author === NO_PERSON ? none : author);
+// A session's project is the folder it ran in: show the last part, filter on the whole path.
+const NO_PROJECT = "(no project)";
+const pathTail = (p, n = 1) => String(p).replace(/[\\/]+$/, "").split(/[\\/]/).slice(-n).join("/") || p;
+const projectName = (p) => (p ? pathTail(p) : "Unknown");
+// Who ran a session and with what, for a row's second line.
+const ranBy = (s) => [has("people") && personLabel(s.author), s.agent].filter(Boolean).join(" · ");
+// Shown in the side bar and the intro: the GitHub repo, the one project, or how many projects.
+function workspaceLabel() {
+  const d = state.data;
+  if (d.meta.repo) return d.meta.repo;
+  const projects = new Set(d.sessions.map((s) => s.project).filter(Boolean));
+  return projects.size === 1 ? projectName([...projects][0]) : projects.size ? plural(projects.size, "project") : "";
+}
+// A card that says what is missing and how to get it, in place of empty tables.
+const notice = (title, text) => `<section class="card"><div class="card-body"><h2>${esc(title)}</h2><p>${text}</p></div></section>`;
+const NOTICES = {
+  sessions: () => notice("No sessions yet", "debrief found no agent sessions to report on. Run <code>debrief sync</code> to import them."),
+  labels: () => notice("Sessions imported, not analysed yet", `${plural(state.data.sessions.length, "session")} to <a href="#sessions">browse</a>, but none is labelled yet, so there are no correction rates or ideas. Run <code>debrief sync</code> to label them.`),
+  ideas: () => notice("No ideas yet", "The messages are labelled, but no findings or ideas have been written from them. Run <code>debrief sync</code> to finish the analysis."),
+};
 const correctedTurns = (s) => s.friction.filter(([, sig]) => sig.some((x) => CORRECTING.includes(x))).length;
 
 const agentKey = (agent) => ({ "Claude Code": "claude", Codex: "codex", Pi: "pi" }[agent] || "other");
@@ -400,24 +421,26 @@ function recTable(recs, { compact = false, sortable = false } = {}) {
     ? `<th class="sortable ${cls}" data-rec-sort="${k}" aria-sort="${f.sort === k ? (f.dir > 0 ? "ascending" : "descending") : "none"}">${label}${f.sort === k ? (f.dir > 0 ? " ↑" : " ↓") : ""}</th>`
     : `<th class="${cls}">${label}</th>`);
   return `<div class="table-wrap"><table><thead><tr><th>Idea</th><th>Type</th>
-    ${th("sessions", "Sessions", "r")}${th("people", "People", "r")}</tr></thead>
+    ${th("sessions", "Sessions", "r")}${has("people") ? th("people", "People", "r") : ""}</tr></thead>
     <tbody>${recs.map((r) => `<tr class="click" data-href="rec~${r.id}">
       <td style="min-width:260px"><div class="cell-title">${esc(r.title)}${weakPill(r)}</div>${!compact && r.target ? `<div class="cell-sub mono">${esc(r.target)}</div>` : ""}</td>
       <td class="nowrap">${esc(lever(r.lever))}</td>
-      <td class="r">${r.sessions.length}</td><td class="r">${r.people}</td></tr>`).join("")}</tbody></table></div>`;
+      <td class="r">${r.sessions.length}</td>${has("people") ? `<td class="r">${r.people}</td>` : ""}</tr>`).join("")}</tbody></table></div>`;
 }
 
 function sessionRows(S) {
+  const col = { project: has("projects"), person: has("people"), pr: has("github") };
   return S.map((s) => {
     const c = Object.fromEntries(SIG_ORDER.map((g) => [g, s[SIG_FIELD[g]]]));
     return `<tr class="click" data-href="session~${s.id}">
       <td class="num nowrap">${day(s.started)}</td>
       <td style="min-width:220px"><div class="cell-title">${esc(s.name || short(s.id))}</div><div class="cell-sub">${esc(s.prompt)}</div></td>
+      ${col.project ? `<td class="nowrap${s.project ? "" : " muted"}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis" title="${esc(s.project || "")}">${esc(projectName(s.project))}</td>` : ""}
       <td class="nowrap">${agentChip(s.agent)}<div class="cell-sub">${esc(s.model || "")}</div></td>
-      <td class="nowrap${s.author ? "" : " muted"}">${esc(personLabel(s.author))}</td>
+      ${col.person ? `<td class="nowrap${s.author ? "" : " muted"}">${esc(personLabel(s.author))}</td>` : ""}
       <td class="r">${s.human_turns}</td>
       <td><span class="mini">${SIG_ORDER.filter((g) => c[g]).map((g) => `<span class="sig" data-tip="${c[g]} ${SIGNALS[g].plural.toLowerCase()}">${glyph(g)}${c[g]}</span>`).join("") || `<span class="muted">—</span>`}</span></td>
-      <td>${outcomeChip(s.outcome)}</td><td class="nowrap">${s.prs.map((p) => `${prLink(p.n)} <span class="pr-state">${esc(p.state)}</span>`).join("<br>") || `<span class="muted">—</span>`}</td>
+      <td>${outcomeChip(s.outcome)}</td>${col.pr ? `<td class="nowrap">${s.prs.map((p) => `${prLink(p.n)} <span class="pr-state">${esc(p.state)}</span>`).join("<br>") || `<span class="muted">—</span>`}</td>` : ""}
     </tr>`;
   }).join("");
 }
@@ -427,7 +450,7 @@ function turnRows(turns) {
     const s = state.sessionsById.get(t.s) || {};
     return `<tr class="click" data-href="session~${t.s}~${t.i}">
       <td class="num nowrap top">${day(t.ts || s.started)}</td>
-      <td class="top" style="min-width:180px"><div class="cell-title">${esc(s.name || short(t.s))}</div><div class="cell-sub">${esc(personLabel(s.author))} · ${esc(s.agent || "")}</div></td>
+      <td class="top" style="min-width:180px"><div class="cell-title">${esc(s.name || short(t.s))}</div><div class="cell-sub">${esc(ranBy(s))}</div></td>
       <td class="top"><div class="chips">${t.sig.map((g) => `<span class="sig">${glyph(g)}${esc(g === "correction" && t.ctype ? CORRECTION_TYPES[t.ctype] || t.ctype : SIGNALS[g].label)}</span>`).join("")}</div></td>
       <td class="top" style="min-width:280px;color:var(--text-default);overflow-wrap:anywhere">${esc(t.text)}</td></tr>`;
   }).join("");
@@ -437,7 +460,7 @@ function turnRows(turns) {
 
 function renderNav(active) {
   const counts = { recs: state.data.recommendations.length, sessions: state.data.sessions.length };
-  $("#nav").innerHTML = PAGES.map((p, i) => `${p.secondary && !PAGES[i - 1]?.secondary ? '<div class="nav-label">About</div>' : ""}<a href="#${p.id}"${p.id === active ? ' aria-current="page"' : ""}>
+  $("#nav").innerHTML = pages().map((p, i, shown) => `${p.secondary && !shown[i - 1]?.secondary ? '<div class="nav-label">About</div>' : ""}<a href="#${p.id}"${p.id === active ? ' aria-current="page"' : ""}>
     <svg viewBox="0 0 16 16" aria-hidden="true">${ICONS[p.id]}</svg><span>${esc(p.label)}</span>${counts[p.id] ? `<span class="count">${counts[p.id]}</span>` : ""}</a>`).join("");
 }
 
@@ -465,8 +488,10 @@ function scopeLabel() {
 function route() {
   const [page, a, b] = (location.hash.slice(1) || "overview").split("~");
   const views = { overview: viewOverview, recs: viewRecs, rec: () => viewRec(a), corrections: viewCorrections, adoption: viewAdoption,
-    delivery: viewDelivery, sessions: viewSessions, session: () => viewSession(a, b), method: () => viewMethod(a), next: viewNext };
-  const view = views[page] || viewOverview;
+    delivery: viewDelivery, sessions: viewSessions, session: () => viewSession(a, b), method: () => viewMethod(a) };
+  if (!has("github")) delete views.delivery;
+  // Nothing imported: every page would be empty tables, so say so once.
+  const view = state.data.sessions.length ? views[page] || viewOverview : () => { renderTopbar({ crumbs: [{ label: "Overview" }] }); return NOTICES.sessions(); };
   renderNav(page === "rec" ? "recs" : page === "session" ? "sessions" : views[page] ? page : "overview");
   $("#content").innerHTML = view();
   const key = location.hash;
@@ -486,7 +511,7 @@ function rerender() {
 // ---------- Overview ----------
 
 function viewOverview() {
-  renderTopbar({ crumbs: [{ label: "Overview" }], scope: true });
+  renderTopbar({ crumbs: [{ label: "Overview" }], scope: has("labels") });
   const d = state.data;
   const sc = scoped();
   const prev = scoped(1);
@@ -494,11 +519,12 @@ function viewOverview() {
   const pm = prev && prev.S.length >= 5 ? metrics(prev.S) : null;
   const wk = weekly(sc.S);
   const recs = d.recommendations;
+  if (!has("labels")) return NOTICES.labels();
 
   const kpis = [
-    kpi({ label: "Agent corrected", def: "correction_rate", desc: "Person said it was wrong, had it redo work, or caught a bug", value: pct1(m.correctedRate), unit: "%", sub: `${fmt(m.corrected)} of ${fmt(m.turns)} messages`, sparkValues: wk.map((w) => w.m.correctedRate), delta: pm && delta(m.correctedRate, pm.correctedRate, { better: "down", pts: true }), href: "#corrections" }),
-    kpi({ label: "Agent overlooked", def: "overlooked_info", desc: "Person pointed it to info it could have found itself", value: pct1(m.could_findRate), unit: "%", sub: `${fmt(m.could_find)} of ${fmt(m.turns)} messages`, sparkValues: wk.map((w) => w.m.could_findRate), delta: pm && delta(m.could_findRate, pm.could_findRate, { better: "down", pts: true }), href: "#corrections" }),
-    kpi({ label: "Shipped rate", def: "shipped_rate", desc: "Sessions that ended with a commit or a PR ready", value: m.shipRate == null ? "—" : Math.round(100 * m.shipRate), unit: "%", sub: `${m.shipped} of ${m.labeled} sessions`, sparkValues: wk.map((w) => w.m.shipRate), delta: pm && delta(m.shipRate, pm.shipRate, { better: "up", pts: true }), href: "#sessions" }),
+    kpi({ label: "Agent corrected", def: "correction_rate", desc: "Person said it was wrong, had it redo work, or caught a bug", value: pct1(m.correctedRate), unit: "%", sub: ofText(m.corrected, m.turns, "messages"), sparkValues: wk.map((w) => w.m.correctedRate), delta: pm && delta(m.correctedRate, pm.correctedRate, { better: "down", pts: true }), href: "#corrections" }),
+    kpi({ label: "Agent overlooked", def: "overlooked_info", desc: "Person pointed it to info it could have found itself", value: pct1(m.could_findRate), unit: "%", sub: ofText(m.could_find, m.turns, "messages"), sparkValues: wk.map((w) => w.m.could_findRate), delta: pm && delta(m.could_findRate, pm.could_findRate, { better: "down", pts: true }), href: "#corrections" }),
+    kpi({ label: "Shipped rate", def: "shipped_rate", desc: "Sessions that ended with a commit or a PR ready", value: m.shipRate == null ? "—" : Math.round(100 * m.shipRate), unit: "%", sub: m.labeled ? ofText(m.shipped, m.labeled, "sessions") : "No session outcomes labelled", sparkValues: wk.map((w) => w.m.shipRate), delta: pm && delta(m.shipRate, pm.shipRate, { better: "up", pts: true }), href: "#sessions" }),
   ].join("");
 
   const trend = card({
@@ -547,7 +573,7 @@ function viewOverview() {
     ${section("Corrections", scopeLabel())}
     <div class="grid"><div class="span-12">${hot}</div></div>
     ${section("Ideas", `From all ${fmt(d.sessions.length)} sessions; the period and harness filters don't apply`)}
-    <div class="grid"><div class="span-12">${top}</div></div>`;
+    <div class="grid"><div class="span-12">${recs.length ? top : NOTICES.ideas()}</div></div>`;
 }
 
 // A backlog title names the fix ("Fix macOS path failure in …"); in a list, name the bug itself.
@@ -559,6 +585,9 @@ function intro() {
   const all = d.sessions;
   const m = metrics(all);
   const prs = new Set(all.flatMap((s) => s.prs.filter((p) => p.state !== "open").map((p) => p.n))).size;
+  const people = has("people") ? ` from ${plural(d.recommendations[0]?.people, "person", "people")}` : "";
+  const stats = [`${fmt(all.length)} sessions`, has("people") && plural(m.people, "person", "people"), `${fmt(m.turns)} human messages`,
+    has("github") && `${fmt(prs)} merged or closed PRs with CI and review`, `${day(d.meta.from)} – ${day(d.meta.to)}`].filter(Boolean).join(" · ");
 
   // Compare only harnesses with 20+ sessions whose rate doesn't rest on one session; name any
   // harness left out for resting on one session when its rate sits outside the compared ones.
@@ -574,24 +603,24 @@ function intro() {
 
   const top = d.recommendations[0];
   // Bug ideas whose evidence held up; weak ones stay on the Ideas page but aren't counted here.
-  const bugs = d.recommendations.filter((r) => r.lever === "backlog" && !r.weak);
+  const bugs = d.recommendations.filter((r) => !r.weak && r.findings.some((i) => d.findings[i]?.kind === "found_not_filed"));
 
   const findings = [
-    { big: `1 in ${Math.round(1 / m.correctedRate)}`, what: "messages people send an agent correct its work.", detail: agentLine, go: "See the messages", href: "#corrections" },
-    top && { eyebrow: "Top idea", title: top.title, detail: `Backed by ${plural(top.evidence.length, "cited item")} across ${plural(top.sessions.length, "session")} from ${plural(top.people, "person", "people")}.`, go: "See the change and evidence", href: `#rec~${top.id}` },
-    bugs.length && { big: fmt(bugs.length), what: "possible bugs agents flagged outside their task and left unfiled in the session.", detail: `For example: ${bugs.slice(0, 2).map((r) => `“${esc(bugName(r.title))}”`).join(" and ")}.`, go: "See the list", href: "#recs", lever: "backlog" },
+    m.corrected && { big: `1 in ${Math.round(1 / m.correctedRate)}`, what: "messages people send an agent correct its work.", detail: agentLine, go: "See the messages", href: "#corrections" },
+    top && { eyebrow: "Top idea", title: top.title, detail: `Backed by ${plural(top.evidence.length, "cited item")} across ${plural(top.sessions.length, "session")}${people}.`, go: "See the change and evidence", href: `#rec~${top.id}` },
+    bugs.length && { big: fmt(bugs.length), what: "possible bugs agents flagged outside their task and left unfiled in the session.", detail: `For example: ${bugs.slice(0, 2).map((r) => `“${esc(bugName(r.title))}”`).join(" and ")}.`, go: "See the list", href: "#recs", lever: bugs[0]?.lever },
   ].filter(Boolean);
 
   return `<section class="card intro">
     <div class="intro-head">
-      <h2>Agent use insights</h2>
-      <p class="intro-repo mono">${esc(d.meta.repo)}</p>
-      <p class="intro-stats">${fmt(all.length)} sessions · ${plural(m.people, "person", "people")} · ${fmt(m.turns)} human messages · ${fmt(prs)} merged or closed PRs with CI and review · ${day(d.meta.from)} – ${day(d.meta.to)}</p>
+      <h2>Session debrief</h2>
+      ${workspaceLabel() ? `<p class="intro-repo mono">${esc(workspaceLabel())}</p>` : ""}
+      <p class="intro-stats">${stats}</p>
     </div>
     <div class="findings">${findings.map((f) => `<div class="finding-cell">
       ${f.eyebrow ? `<span class="finding-eyebrow">${esc(f.eyebrow)}</span><span class="finding-title">${esc(f.title)}</span>` : `<span class="finding-big num">${f.big}</span><span class="finding-title">${esc(f.what)}</span>`}
       ${f.detail ? `<p class="finding-detail">${f.detail}</p>` : ""}
-      <a class="finding-go" href="${f.href}"${f.lever ? ` data-lever="${f.lever}"` : ""}>${esc(f.go)} →</a>
+      <a class="finding-go" href="${f.href}"${f.lever ? ` data-lever="${esc(f.lever)}"` : ""}>${esc(f.go)} →</a>
     </div>`).join("")}</div>
   </section>`;
 }
@@ -622,12 +651,14 @@ function viewRecs() {
   renderTopbar({ crumbs: [{ label: "Ideas" }] });
   const f = state.recFilter;
   const recs = filteredRecs();
-  const segs = [["", "All", d.recommendations.length], ...Object.entries(LEVERS).map(([k, l]) => [k, l, d.recommendations.filter((r) => r.lever === k).length]).filter(([, , n]) => n)];
+  if (!d.recommendations.length) return has("labels") ? NOTICES.ideas() : NOTICES.labels();
+  const levers = [...new Set([...Object.keys(d.levers || {}), ...d.recommendations.map((r) => r.lever)])];
+  const segs = [["", "All", d.recommendations.length], ...levers.map((k) => [k, lever(k), d.recommendations.filter((r) => r.lever === k).length]).filter(([, , n]) => n)];
   return `<p class="page-sub">${d.recommendations.length} ideas from all ${d.meta.sessions} sessions, sorted by how many sessions each touches. Each is a lead to check against its evidence, not a verdict.</p>
     <section class="card">
       <div class="toolbar">
         <input type="search" id="rec-q" placeholder="Search ideas" value="${esc(f.q)}" aria-label="Search ideas">
-        <div class="seg-ctl" role="group" aria-label="Type">${segs.map(([k, l, n]) => `<button type="button" data-rec-lever="${k}" aria-pressed="${f.lever === k}">${l}<span class="n">${n}</span></button>`).join("")}</div>
+        <div class="seg-ctl" role="group" aria-label="Type">${segs.map(([k, l, n]) => `<button type="button" data-rec-lever="${esc(k)}" aria-pressed="${f.lever === k}">${esc(l)}<span class="n">${n}</span></button>`).join("")}</div>
         <span class="spacer"></span><span class="muted small num">${recs.length} shown</span>
       </div>
       ${recTable(sortRecs(recs), { sortable: true })}
@@ -667,7 +698,7 @@ function viewRec(id) {
       ${r.target ? `<dt>Lands in</dt><dd class="mono small">${esc(r.target)}</dd>` : ""}
     </dl>
     <div class="section"><h3>Reach</h3>
-      <div class="num">${plural(r.sessions.length, "session")} · ${plural(r.people, "person", "people")}</div>
+      <div class="num">${plural(r.sessions.length, "session")}${has("people") ? ` · ${plural(r.people, "person", "people")}` : ""}</div>
       ${r.checked ? `<div class="small" data-tip="A second model pass checked each cited item against this idea; items that didn't support it are hidden and don't count toward reach.">${r.evidence.length} of ${plural(r.evidence_all, "cited item")} support this idea</div>` : ""}
       ${ev.length ? `<div class="muted small">${[counts.msg && plural(counts.msg, "message"), counts.check && plural(counts.check, "CI run"), counts.review && plural(counts.review, "review comment")].filter(Boolean).join(" · ")}${r.checked ? "" : " cited"}</div>` : ""}
       ${r.weak ? `<div class="small" style="color:var(--text-muted)">Weak evidence. ${WEAK_TIP}</div>` : r.sessions.length <= 1 ? `<div class="small" style="color:var(--text-muted)">Single session. Check the evidence before acting.</div>` : ""}
@@ -684,7 +715,7 @@ function evidenceItem(x) {
     const who = x.role === "assistant" ? "Agent" : "Human";
     const sigs = (x.signals || []).filter((g) => g !== "not_filed" || x.role === "assistant");
     return `<a class="ev" href="${sessionHref(x.session_id, x.msg_idx)}">
-      <div class="ev-head"><span class="src">${esc(s.name || short(x.session_id))}</span><span>${esc(personLabel(s.author))} · ${esc(s.agent || "")} · turn ${x.msg_idx}</span></div>
+      <div class="ev-head"><span class="src">${esc(s.name || short(x.session_id))}</span><span>${esc(ranBy(s))} · turn ${x.msg_idx}</span></div>
       <div class="quote${x.role === "assistant" ? " agent" : ""}"><span class="muted small">${who}: </span>${esc(x.role === "assistant" ? x.agent_before || x.text : x.text)}</div>
       ${sigs.length ? `<div class="chips">${sigs.map((g) => sigChip(g, g === "correction" && x.correction_type ? ` · ${esc(CORRECTION_TYPES[x.correction_type] || x.correction_type)}` : "")).join("")}</div>` : ""}
     </a>`;
@@ -722,17 +753,18 @@ function wireRec(r) {
 // ---------- Corrections ----------
 
 function viewCorrections() {
-  renderTopbar({ crumbs: [{ label: "Corrections" }], scope: true });
+  renderTopbar({ crumbs: [{ label: "Corrections" }], scope: has("labels") });
   const sc = scoped();
   const prev = scoped(1);
   const m = metrics(sc.S);
   const pm = prev && prev.S.length >= 5 ? metrics(prev.S) : null;
   const wk = weekly(sc.S);
   const f = state.correctionsFilter;
+  if (!has("labels")) return NOTICES.labels();
 
-  const headline = kpi({ label: "Agent corrected", def: "correction_rate", value: pct1(m.correctedRate), unit: "%", sub: `${fmt(m.corrected)} of ${fmt(m.turns)} messages`,
+  const headline = kpi({ label: "Agent corrected", def: "correction_rate", value: pct1(m.correctedRate), unit: "%", sub: ofText(m.corrected, m.turns, "messages"),
     sparkValues: wk.map((w) => w.m.correctedRate), delta: pm && delta(m.correctedRate, pm.correctedRate, { better: "down", pts: true }) })
-    + kpi({ label: "Agent overlooked", def: "overlooked_info", value: pct1(m.could_findRate), unit: "%", sub: `${fmt(m.could_find)} of ${fmt(m.turns)} messages`,
+    + kpi({ label: "Agent overlooked", def: "overlooked_info", value: pct1(m.could_findRate), unit: "%", sub: ofText(m.could_find, m.turns, "messages"),
       sparkValues: wk.map((w) => w.m.could_findRate), delta: pm && delta(m.could_findRate, pm.could_findRate, { better: "down", pts: true }) });
 
   const agentRows = [...groupBy(sc.S, (s) => s.agent)].map(([a, ss]) => ({ a, mm: metrics(ss), one: restsOnOne(ss), tools: sum(ss, (s) => s.tool_calls), err: sum(ss, (s) => s.tool_errors) }))
@@ -747,7 +779,7 @@ function viewCorrections() {
     body: `<div class="table-wrap"><table><thead><tr><th>Harness</th><th class="r">Sessions</th><th class="r">Human messages</th>${cols.map((c) => `<th${c.sub ? ' class="muted"' : ""}>${esc(c.label)}</th>`).join("")}<th class="r">Failed tool calls</th></tr></thead><tbody>
       ${agentRows.map((r) => `<tr><td class="nowrap">${agentChip(r.a)}${r.mm.sessions < 10 ? ` <span class="pill" data-tip="Fewer than 10 sessions: treat the rates as anecdotes">low n</span>` : restsPill(r.one)}</td><td class="r">${r.mm.sessions}</td><td class="r">${fmt(r.mm.turns)}</td>
         ${cols.map((c) => `<td>${inlineBar(c.rate(r.mm) || 0, maxRate, c.color, pctText(c.rate(r.mm)), `${r.a}: ${c.n(r.mm)} of ${r.mm.turns} messages`)}</td>`).join("")}
-        <td class="r">${pct(r.err, r.tools)}% <span class="muted">of ${fmt(r.tools)}</span></td></tr>`).join("")}</tbody></table></div>` });
+        <td class="r">${r.tools ? `${pct(r.err, r.tools)}% <span class="muted">of ${fmt(r.tools)}</span>` : `<span class="muted">—</span>`}</td></tr>`).join("")}</tbody></table></div>` });
 
   const mRows = modelRows(sc.S);
   const maxModelRate = Math.max(0.0001, ...mRows.flatMap((r) => [r.mm.correctedRate || 0, r.mm.could_findRate || 0]));
@@ -810,6 +842,7 @@ function viewAdoption() {
   const all = state.data.sessions;
   const agents = [...new Set(all.map((s) => s.agent))].sort((a, b) => all.filter((s) => s.agent === b).length - all.filter((s) => s.agent === a).length);
   const wk = weekly(S);
+  const labelled = has("labels");
   const habits = habitCard(S, new Set(sc.skills.map((u) => u.s)));
 
   const maxWeek = Math.max(1, ...wk.map((w) => w.S.length));
@@ -828,7 +861,8 @@ function viewAdoption() {
   const totalTurns = sum(Object.values(kinds));
   const kindRows = Object.entries(kinds).sort((a, b) => b[1] - a[1]).map(([k, n]) => ({ label: TURN_KINDS[k] || k, value: n, valText: `${pct(n, totalTurns)}%`, color: k === "correction" ? "var(--sig-corrected)" : undefined, tip: `${fmt(n)} messages` }));
 
-  const settled = S.filter((s) => s.settled);
+  // Without GitHub no session has a settled PR, so compare all of them.
+  const settled = has("github") ? S.filter((s) => s.settled) : S;
   const styles = [...groupBy(settled.filter((s) => s.prompt_style), (s) => s.prompt_style)].map(([k, ss]) => ({ k, n: ss.length, f: sum(ss, correctedTurns) / ss.length, shipped: ss.filter((s) => s.outcome === "shipped_or_pr_ready").length }))
     .sort((a, b) => a.f - b.f);
   const maxF = Math.max(0.0001, ...styles.map((r) => r.f));
@@ -838,19 +872,20 @@ function viewAdoption() {
 
   return `<p class="page-sub">${scopeLabel()}</p>
     <div class="grid">
-      <div class="span-12">${habits}</div>
-      <div class="span-8">${card({ title: "Sessions by week", def: "sessions", tip: "Every session with at least two steps in Claude Code, Codex or Pi, by the week it started.", aside: legend(agents.map((a) => ({ c: agentColor(a), label: a }))), body: weekChart })}</div>
+      ${labelled ? `<div class="span-12">${habits}</div>` : ""}
+      <div class="span-8">${card({ title: "Sessions by week", def: "sessions", tip: "Sessions by the week they started.", aside: legend(agents.map((a) => ({ c: agentColor(a), label: a }))), body: weekChart })}</div>
       <div class="span-4">${card({ title: "Harnesses and models", flush: true, foot: moreModels > 0 ? `<span class="muted">+${plural(moreModels, "more model")}</span>` : "",
         body: `<div class="table-wrap"><table><thead><tr><th>Harness</th><th>Model</th><th class="r">Sessions</th></tr></thead><tbody>${models.slice(0, 10).map(([k, ss]) => { const [a, mo] = k.split("|"); return `<tr><td class="nowrap">${agentChip(a)}</td><td class="mono small">${esc(mo)}</td><td class="r">${ss.length}</td></tr>`; }).join("")}</tbody></table></div>` })}</div>
-      <div class="span-6">${card({ title: "People", def: "per_person", tip: `${defTip("per_person")}${nobody.length ? ` ${plural(nobody.length, "session")} ha${nobody.length === 1 ? "s" : "ve"} no person: the harness didn't record who ran them.` : ""}`, flush: true,
+      ${has("people") ? `<div class="span-6">${card({ title: "People", def: "per_person", tip: `${defTip("per_person")}${nobody.length ? ` ${plural(nobody.length, "session")} ha${nobody.length === 1 ? "s" : "ve"} no person: the harness didn't record who ran them.` : ""}`, flush: true,
         body: `<div class="table-wrap"><table><thead><tr><th>Person</th><th class="r">Sessions</th><th>Harnesses</th><th class="r">Human messages</th><th>Last session</th></tr></thead><tbody>
         ${people.map(([p, ss]) => `<tr class="click" data-href="sessions" data-author="${esc(p)}"><td${p === NO_PERSON ? ' class="muted"' : ""}>${esc(personLabel(p, "No person recorded"))}</td><td class="r">${ss.length}</td><td><span class="mini">${[...new Set(ss.map((s) => s.agent))].map((a) => `<span class="dot" style="--c:${agentColor(a)}" data-tip="${esc(a)}"></span>`).join("")}</span></td><td class="r">${fmt(sum(ss, (s) => s.human_turns))}</td><td class="num">${day(ss.reduce((x, s) => (time(s.started) > time(x) ? s.started : x), ss[0].started))}</td></tr>`).join("")}
-        </tbody></table></div>` })}</div>
-      <div class="span-6">${card({ title: "How human messages are spent", def: "turn_kinds", aside: `${fmt(totalTurns)} messages`, body: bars(kindRows, { labelWidth: "minmax(120px,170px)" }) })}</div>
-      <div class="span-6">${card({ title: "Opening prompt vs corrections", def: "prompt_styles", aside: `Sessions with a merged or closed PR (${fmt(settled.length)})`, flush: true,
+        </tbody></table></div>` })}</div>` : ""}
+      ${labelled ? `<div class="span-6">${card({ title: "How human messages are spent", def: "turn_kinds", aside: `${fmt(totalTurns)} messages`, body: bars(kindRows, { labelWidth: "minmax(120px,170px)" }) })}</div>
+      <div class="span-6">${card({ title: "Opening prompt vs corrections", def: "prompt_styles", tip: has("github") ? "" : "How the person opened the session. Small groups: read a gap as a lead, not proof.",
+        aside: `${has("github") ? "Sessions with a merged or closed PR" : "All sessions"} (${fmt(settled.length)})`, flush: true,
         body: `<div class="table-wrap"><table><thead><tr><th>Opening prompt</th><th class="r">Sessions</th><th>Corrections / session</th><th class="r">Shipped</th></tr></thead><tbody>
-        ${styles.map((r) => `<tr><td>${esc(PROMPT_STYLES[r.k] || r.k)}</td><td class="r">${r.n}</td><td>${inlineBar(r.f, maxF, "var(--sig-corrected)", r.f.toFixed(2))}</td><td class="r">${pct(r.shipped, r.n)}%</td></tr>`).join("") || `<tr><td colspan="4" class="empty">No settled sessions in this period.</td></tr>`}
-        </tbody></table></div>` })}</div>
+        ${styles.map((r) => `<tr><td>${esc(PROMPT_STYLES[r.k] || r.k)}</td><td class="r">${r.n}</td><td>${inlineBar(r.f, maxF, "var(--sig-corrected)", r.f.toFixed(2))}</td><td class="r">${pct(r.shipped, r.n)}%</td></tr>`).join("") || `<tr><td colspan="4" class="empty">No ${has("github") ? "settled sessions" : "sessions with a labelled opening prompt"} in this period.</td></tr>`}
+        </tbody></table></div>` })}</div>` : ""}
       <div class="span-6">${card({ title: "Skills and slash commands", def: "skills_use", flush: true,
         body: skills.length ? `<div class="table-wrap"><table><thead><tr><th>Skill</th><th class="r">Sessions</th><th class="r">Typed</th><th class="r">Auto-loaded</th></tr></thead><tbody>
         ${skills.map((k) => `<tr><td class="mono small">${esc(k.k)}</td><td class="r">${k.sessions}</td><td class="r">${k.human}</td><td class="r">${k.agent}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">No skill use in this period.</div>` })}</div>
@@ -862,7 +897,7 @@ const HABITS = [
   { label: "Agent planned before editing", has: (s) => (s.planned_first ? s.planned_first === "true" : null) },
   { label: "Session changed tests", has: (s) => (s.tests_added ? s.tests_added === "true" : null) },
   { label: "Used a skill or slash command", has: (s, skilled) => skilled.has(s.id) },
-  { label: "Opened with an issue, PR or trail link", has: (s) => (s.prompt_style ? s.prompt_style === "links_issue_or_pr" : null) },
+  { label: "Opened with an issue or PR link", has: (s) => (s.prompt_style ? s.prompt_style === "links_issue_or_pr" : null) },
 ];
 function habitCard(S, skilled) {
   const rows = HABITS.map((h) => {
@@ -905,13 +940,16 @@ function viewDelivery() {
   // Checks data holds only each check's latest attempt, so re-run passes show up only once data has retries.
   const reruns = fails.filter((f) => f.flaky).length;
   const rerunTip = "Seen, not judged: the same check failed, then passed later on the same commit. Flaky test is a cause read from the log, so the two counts needn't match.";
-  const failNote = `${plural(fails.length, "failed run")} on merged or closed PRs in this window. The rest of the ${fmt(state.data.meta.check_failures)} failed runs on record are on open PRs, the approval gate or the rollup "test" job, or before the window.`;
+  const failNote = `${plural(fails.length, "failed run")} on merged or closed PRs in this window. The rest of the ${fmt(state.data.meta.check_failures)} failed runs on record are on open PRs or an approval gate, or before the window.`;
+  // A share of nothing is a dash, not 0%.
+  const share100 = (a, b) => (b ? pct(a, b) : "—");
+  const unit = (b) => (b ? "%" : "");
 
   const kpis = [
-    kpi({ label: "Failures from infra", def: "ci_causes", tip: `Runner, network, setup or missing-secret failures: not the code's fault. ${failNote}`, value: pct(infra, fails.length), unit: "%", sub: `${infra} of ${fails.length}` }),
-    kpi({ label: "Review comments", def: "settled_pr", tip: "Top-level review comments on merged or closed PRs.", value: fmt(R.length), sub: `${fmt(inlineR.length)} inline · ${pct(bots.length, R.length)}% from bots` }),
-    kpi({ label: "Bot comments valid", def: "held_up", tip: `Bot comments labeled valid (fixed or left open). ${heldTip}`, value: pct(botInline.filter((r) => r.held?.startsWith("valid")).length, botInline.length), unit: "%", sub: `of ${botInline.length} inline` }),
-    kpi({ label: "Bot comments wrong", def: "held_up", tip: `Bot comments where the thread shows the reviewer was wrong. Each one costs a human rebuttal. ${heldTip}`, value: pct(botWrong, botInline.length), unit: "%", sub: plural(botWrong, "comment") }),
+    kpi({ label: "Failures from infra", def: "ci_causes", tip: `Runner, network, setup or missing-secret failures: not the code's fault. ${failNote}`, value: share100(infra, fails.length), unit: unit(fails.length), sub: ofText(infra, fails.length, "failed runs") }),
+    kpi({ label: "Review comments", def: "settled_pr", tip: "Top-level review comments on merged or closed PRs.", value: fmt(R.length), sub: R.length ? `${fmt(inlineR.length)} inline · ${pct(bots.length, R.length)}% from bots` : "" }),
+    kpi({ label: "Bot comments valid", def: "held_up", tip: `Bot comments labeled valid (fixed or left open). ${heldTip}`, value: share100(botInline.filter((r) => r.held?.startsWith("valid")).length, botInline.length), unit: unit(botInline.length), sub: botInline.length ? `of ${botInline.length} inline` : "No inline bot comments" }),
+    kpi({ label: "Bot comments wrong", def: "held_up", tip: `Bot comments where the thread shows the reviewer was wrong. Each one costs a human rebuttal. ${heldTip}`, value: share100(botWrong, botInline.length), unit: unit(botInline.length), sub: botInline.length ? plural(botWrong, "comment") : "No inline bot comments" }),
   ].join("");
 
   const byClass = [...groupBy(fails, (f) => f.class)].sort((a, b) => b[1].length - a[1].length);
@@ -919,7 +957,8 @@ function viewDelivery() {
   const heldOrder = ["valid_and_fixed", "valid_open", "outdated", "wrong", "unclear", null];
   const who = [["Bots", botInline], ["People", inlineR.filter((r) => !r.bot)]];
   const botRows = [...groupBy(botInline, (r) => r.author)].sort((a, b) => b[1].length - a[1].length);
-  const related = state.data.recommendations.filter((r) => r.lever === "ci_infra" || r.lever === "review_tooling");
+  // Ideas that cite a CI run or a review comment.
+  const related = state.data.recommendations.filter((r) => r.evidence.some((k) => ["check", "review"].includes(state.data.refs[k]?.type)));
   // Infra failures aren't the code's fault; a module-download error names whatever file did the import.
   const placed = fails.filter((f) => f.area && f.class !== "infra_or_env");
   const byArea = [...groupBy(placed, (f) => f.area)].sort((a, b) => b[1].length - a[1].length).slice(0, 10);
@@ -973,8 +1012,9 @@ function viewDelivery() {
 function filteredSessions() {
   const f = state.sessionFilter;
   const q = f.q.trim().toLowerCase();
-  const S = scoped().S.filter((s) => (!f.author || (f.author === NO_PERSON ? !s.author : s.author === f.author)) && (!f.outcome || s.outcome === f.outcome) && (!f.corrected || correctedTurns(s) > 0) &&
-    (!q || `${s.name} ${s.prompt} ${s.id} ${s.prs.map((p) => p.n).join(" ")}`.toLowerCase().includes(q)));
+  const S = scoped().S.filter((s) => (!f.author || (f.author === NO_PERSON ? !s.author : s.author === f.author)) &&
+    (!f.project || (f.project === NO_PROJECT ? !s.project : s.project === f.project)) && (!f.outcome || s.outcome === f.outcome) && (!f.corrected || correctedTurns(s) > 0) &&
+    (!q || `${s.name} ${s.prompt} ${s.id} ${s.project || ""} ${s.prs.map((p) => p.n).join(" ")}`.toLowerCase().includes(q)));
   const key = { started: (s) => s.started, turns: (s) => s.human_turns, corrections: correctedTurns, name: (s) => (s.name || "").toLowerCase() }[f.sort];
   return S.slice().sort((a, b) => (key(a) > key(b) ? 1 : key(a) < key(b) ? -1 : 0) * f.dir);
 }
@@ -983,21 +1023,29 @@ function viewSessions() {
   renderTopbar({ crumbs: [{ label: "Sessions" }], scope: true });
   const f = state.sessionFilter;
   const S = filteredSessions();
-  const authors = [...new Set(state.data.sessions.map((s) => s.author).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const all = state.data.sessions;
+  const authors = [...new Set(all.map((s) => s.author).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  // Two folders with the same name show their parent too, so the options stay distinct.
+  const projects = [...new Set(all.map((s) => s.project).filter(Boolean))];
+  const sameName = groupBy(projects, projectName);
+  const projectOpts = projects.map((p) => [p, pathTail(p, sameName.get(projectName(p)).length > 1 ? 2 : 1)]).sort((a, b) => a[1].localeCompare(b[1]));
+  const noProject = all.some((s) => !s.project);
+  const col = { project: has("projects"), person: has("people"), pr: has("github") };
   const th = (k, l, cls = "") => `<th class="sortable ${cls}" data-sort="${k}" aria-sort="${f.sort === k ? (f.dir > 0 ? "ascending" : "descending") : "none"}">${l}${f.sort === k ? (f.dir > 0 ? " ↑" : " ↓") : ""}</th>`;
   setTimeout(wireSessions, 0);
   return `<p class="page-sub">${scopeLabel()}</p>
     <section class="card">
       <div class="toolbar">
-        <input type="search" id="s-q" placeholder="Search name, prompt or PR" value="${esc(f.q)}" aria-label="Search sessions">
-        <select id="s-author" aria-label="Person"><option value="">All people</option>${authors.map((a) => `<option${a === f.author ? " selected" : ""}>${esc(a)}</option>`).join("")}${state.data.sessions.some((s) => !s.author) ? `<option value="${esc(NO_PERSON)}"${f.author === NO_PERSON ? " selected" : ""}>Unknown</option>` : ""}</select>
+        <input type="search" id="s-q" placeholder="Search name${col.project ? ", project" : ""}${col.pr ? ", prompt or PR" : " or prompt"}" value="${esc(f.q)}" aria-label="Search sessions">
+        ${col.project && projects.length + noProject > 1 ? `<select id="s-project" aria-label="Project" style="max-width:220px"><option value="">All projects</option>${projectOpts.map(([p, l]) => `<option value="${esc(p)}" title="${esc(p)}"${p === f.project ? " selected" : ""}>${esc(l)}</option>`).join("")}${noProject ? `<option value="${esc(NO_PROJECT)}"${f.project === NO_PROJECT ? " selected" : ""}>Unknown</option>` : ""}</select>` : ""}
+        ${col.person ? `<select id="s-author" aria-label="Person"><option value="">All people</option>${authors.map((a) => `<option${a === f.author ? " selected" : ""}>${esc(a)}</option>`).join("")}${all.some((s) => !s.author) ? `<option value="${esc(NO_PERSON)}"${f.author === NO_PERSON ? " selected" : ""}>Unknown</option>` : ""}</select>` : ""}
         <select id="s-outcome" aria-label="Outcome"><option value="">Any outcome</option>${Object.entries(OUTCOMES).map(([k, l]) => `<option value="${k}"${k === f.outcome ? " selected" : ""}>${l}</option>`).join("")}</select>
         <label class="check"><input type="checkbox" id="s-corrected"${f.corrected ? " checked" : ""}> Has corrections</label>
         <span class="spacer"></span><span class="muted small num">${S.length} of ${scoped().S.length}</span>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr>${th("started", "Started")}${th("name", "Session")}<th>Harness</th><th>Person</th>${th("turns", "Messages", "r")}${th("corrections", "Signals")}<th>Outcome</th><th>PR</th></tr></thead>
-        <tbody>${sessionRows(S) || `<tr><td colspan="8" class="empty">No sessions match.</td></tr>`}</tbody>
+        <thead><tr>${th("started", "Started")}${th("name", "Session")}${col.project ? "<th>Project</th>" : ""}<th>Harness</th>${col.person ? "<th>Person</th>" : ""}${th("turns", "Messages", "r")}${th("corrections", "Signals")}<th>Outcome</th>${col.pr ? "<th>PR</th>" : ""}</tr></thead>
+        <tbody>${sessionRows(S) || `<tr><td colspan="${6 + col.project + col.person + col.pr}" class="empty">No sessions match.</td></tr>`}</tbody>
       </table></div>
     </section>`;
 }
@@ -1006,6 +1054,7 @@ function wireSessions() {
   const f = state.sessionFilter;
   $("#s-q")?.addEventListener("input", (e) => { f.q = e.target.value; rerender(); });
   $("#s-author")?.addEventListener("change", (e) => { f.author = e.target.value; rerender(); });
+  $("#s-project")?.addEventListener("change", (e) => { f.project = e.target.value; rerender(); });
   $("#s-outcome")?.addEventListener("change", (e) => { f.outcome = e.target.value; rerender(); });
   $("#s-corrected")?.addEventListener("change", (e) => { f.corrected = e.target.checked; rerender(); });
   $$("th[data-sort]").forEach((th) => th.addEventListener("click", () => { const k = th.dataset.sort; f.dir = f.sort === k ? -f.dir : -1; f.sort = k; rerender(); }));
@@ -1040,7 +1089,7 @@ function viewSession(id, focusIdx) {
   const focus = focusIdx != null ? Number(focusIdx) : null;
   const recs = state.recsBySession.get(id) || [];
   const dur = time(s.last) - time(s.started);
-  const durText = dur > DAY ? `${(dur / DAY).toFixed(1)} days` : `${Math.max(1, Math.round(dur / 36e5))} h`;
+  const durText = Number.isNaN(dur) ? "—" : dur > DAY ? `${(dur / DAY).toFixed(1)} days` : `${Math.max(1, Math.round(dur / 36e5))} h`;
 
   const main = `<section class="card">
     <div class="card-head"><h2>Transcript</h2></div>
@@ -1052,14 +1101,15 @@ function viewSession(id, focusIdx) {
     <dl>
       <dt>Harness</dt><dd>${agentChip(s.agent)}</dd>
       <dt>Model</dt><dd class="mono small">${esc(s.model || "unknown")}</dd>
-      <dt>Person</dt><dd>${esc(personLabel(s.author))}</dd>
+      ${s.project ? `<dt>Project</dt><dd class="mono small" title="${esc(s.project)}">${esc(projectName(s.project))}</dd>` : ""}
+      ${has("people") ? `<dt>Person</dt><dd>${esc(personLabel(s.author))}</dd>` : ""}
       <dt>Started</dt><dd>${dayTime(s.started)}</dd>
       <dt>Duration</dt><dd class="num">${durText}</dd>
       <dt>Outcome</dt><dd>${outcomeChip(s.outcome)}</dd>
       <dt>Human turns</dt><dd class="num">${s.human_turns}</dd>
       <dt>Tool calls</dt><dd class="num">${fmt(s.tool_calls)} <span class="muted">(${fmt(s.tool_errors)} failed)</span></dd>
-      <dt>Checkpoints</dt><dd class="num">${s.checkpoints ?? "—"}</dd>
-      <dt>PR</dt><dd>${s.prs.map((p) => `${prLink(p.n)} <span class="pr-state">${esc(p.state)}</span>`).join("<br>") || "—"}</dd>
+      ${has("checkpoints") ? `<dt>Checkpoints</dt><dd class="num">${s.checkpoints ?? "—"}</dd>` : ""}
+      ${has("github") ? `<dt>PR</dt><dd>${s.prs.map((p) => `${prLink(p.n)} <span class="pr-state">${esc(p.state)}</span>`).join("<br>") || "—"}</dd>` : ""}
     </dl>
     <div class="section"><h3>Signals</h3><div class="chips">${SIG_ORDER.map((g) => `<span class="sig" data-tip="${esc(SIGNALS[g].tip)}">${glyph(g)}${s[SIG_FIELD[g]]} ${esc(SIGNALS[g].label.toLowerCase())}</span>`).join("")}</div>
       ${s.not_filed ? `<div class="small muted">${glyph("not_filed")} ${plural(s.not_filed, "problem")} found and left unfiled in the session</div>` : ""}</div>
@@ -1146,25 +1196,19 @@ function agentRun(msgs, focus) {
 
 // ---------- How it works ----------
 
-function viewNext() {
-  renderTopbar({ crumbs: [{ label: "Next steps" }] });
-  return `<section class="card next-text"><div class="card-body">
-    <h2>${esc(NEXT_STEPS.title)}</h2><p>${esc(NEXT_STEPS.intro)}</p>${NEXT_STEPS.lead ? `<p class="next-lead">${esc(NEXT_STEPS.lead)}</p>` : ""}
-    ${NEXT_STEPS.items.map((it, n) => `<h3>${n + 1}. ${esc(it.title)}</h3>${md(it.text)}`).join("")}
-  </div></section>`;
-}
-
 function viewMethod(focus) {
   renderTopbar({ crumbs: [{ label: "How it works" }] });
   const better = { lower: "Lower is better", higher: "Higher is better" };
   const num = (v) => fill(v).replace(/^\d+$/, (n) => fmt(Number(n)));
+  // Lines marked [github] in method.js describe steps that only run on GitHub data.
+  const text = (t) => md(fill(has("github") ? t.replace(/\[github\] /g, "") : t.split("\n").filter((l) => !l.includes("[github]")).join("\n")));
   const glance = `<section class="card glance" aria-label="The method at a glance">${METHOD.steps.map((st, i) => `<a class="glance-step" href="#method~${st.id}">
     <span class="glance-name"><span class="step-n">${i + 1}</span>${esc(st.short)}</span>
     <span class="glance-num num">${esc(num(st.glance[0]))}</span><span class="glance-label">${esc(st.glance[1])}</span></a>`).join("")}</section>`;
   const steps = METHOD.steps.map((st, i) => `<section class="card step${st.id === focus ? " focus" : ""}" id="def-${st.id}">
     <div class="step-head"><span class="step-n">${i + 1}</span><h2>${esc(st.title)}</h2></div>
-    <div class="step-body"><div class="step-lede">${md(fill(st.lede))}</div>${st.text.map((t) => md(fill(t))).join("")}
-      ${st.facts?.length ? `<div class="facts">${st.facts.map(([v, l]) => `<span><b class="num">${esc(num(v))}</b>${esc(l)}</span>`).join("")}</div>` : ""}</div>
+    <div class="step-body"><div class="step-lede">${text(st.lede)}</div>${st.text.map(text).join("")}
+      ${st.facts?.length ? `<div class="facts">${st.facts.filter(([v]) => fill(v) !== "0").map(([v, l]) => `<span><b class="num">${esc(num(v))}</b>${esc(l)}</span>`).join("")}</div>` : ""}</div>
   </section>`).join("");
   const metrics = DEFS.filter((d) => d.page).map((d) => `<article class="def${d.id === focus ? " focus" : ""}" id="def-${d.id}">
     <div class="def-head"><h3>${esc(d.term)}</h3>${d.better ? `<span class="pill">${better[d.better]}</span>` : ""}</div>
@@ -1255,7 +1299,7 @@ async function boot() {
   try {
     state.data = await fetch("data/index.json").then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
   } catch (e) {
-    $("#content").innerHTML = `<section class="card"><div class="card-body"><h2>No data</h2><p>Could not load data/index.json (${esc(e.message)}). Run <code>uv run export_site.py</code>, then serve this folder with <code>python3 -m http.server -d site</code>.</p></div></section>`;
+    $("#content").innerHTML = `<section class="card"><div class="card-body"><h2>No data</h2><p>Could not load data/index.json (${esc(e.message)}). Run <code>debrief sync</code> to build it, and open this page over http, not as a file.</p></div></section>`;
     return;
   }
   const d = state.data;
@@ -1263,9 +1307,9 @@ async function boot() {
   for (const s of d.sessions) state.sessionsById.set(s.id, s);
   for (const r of d.recommendations) for (const sid of r.sessions) (state.recsBySession.get(sid) || state.recsBySession.set(sid, []).get(sid)).push(r);
   const m = d.meta;
-  $("#workspace").innerHTML = `<span>${esc(m.repo)}</span>`;
-  $("#side-foot").innerHTML = `<div class="row"><span>Sessions</span><span>${fmt(m.sessions)} of ${m.window_sessions ? fmt(m.window_sessions) : "?"}</span></div>
-    <div class="row"><span>Window</span><span>${esc(day(m.from))} – ${esc(day(m.to))}</span></div>
+  $("#workspace").innerHTML = `<span>${esc(workspaceLabel())}</span>`;
+  $("#side-foot").innerHTML = `<div class="row"><span>Sessions</span><span>${fmt(m.sessions)}</span></div>
+    ${m.to ? `<div class="row"><span>Window</span><span>${esc(day(m.from))} – ${esc(day(m.to))}</span></div>` : ""}
     <div class="row"><span>Label confidence</span><span>≥ ${m.min_conf}</span></div>`;
   correctionsFromHash();
   route();

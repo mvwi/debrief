@@ -1,8 +1,9 @@
-"""Load GitHub PRs, checks and review comments for the commits in data/raw/.
+"""Load GitHub PRs, checks and review comments for the sessions' checkpoint commits.
 
-Reads checkpoint commit SHAs from each transcript.json, looks them up with the
-logged-in `gh` CLI, and writes gh_prs, gh_commit_prs, gh_checks and
-gh_review_comments in debrief.db.
+Optional. Reads commit SHAs from the checkpoints table, looks them up in one repo with
+the logged-in `gh` CLI, and writes gh_prs, gh_commit_prs, gh_checks and gh_review_comments
+in debrief.db. Only sessions imported from Entire have checkpoints; with none, or without
+a logged-in `gh`, it prints one line and does nothing.
 
 Re-runs skip what cannot change: commits already looked up, settled PRs,
 checks that have all concluded, and failure logs already stored. Heads of
@@ -11,9 +12,9 @@ unsettled PRs always get their checks re-listed, since a job can be re-run.
 Check runs are listed with filter=all, so every attempt of a re-run job is a
 separate gh_checks row; the default returns only the latest attempt.
 
-    uv run python -m debrief.github
-    uv run python -m debrief.github --refresh       # ignore the skips and fetch everything
-    uv run python -m debrief.github --checks-since 2026-08-11
+    uv run python -m debrief.github --repo owner/name
+    uv run python -m debrief.github --repo owner/name --refresh   # ignore the skips and fetch everything
+    uv run python -m debrief.github --repo owner/name --checks-since 2026-08-11
         # only re-list checks on stored commits of sessions active since then,
         # to pick up attempts that the old latest-only listing dropped
 """
@@ -21,20 +22,24 @@ separate gh_checks row; the default returns only the latest attempt.
 import argparse
 import json
 import re
+import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from debrief import db
-from debrief.paths import RAW_DIR
 
 LOG_LINES = 150
 LOG_BYTES = 12_000
 TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 RUN_ID = re.compile(r"/actions/runs/(\d+)")
+# Both go into `gh api` paths, so anything else is refused.
+SHA = re.compile(r"[0-9a-f]{7,40}")
+REPO = re.compile(r"[A-Za-z0-9-]+/(?!\.\.?$)[\w.-]+")  # the name may hold dots but not be "." or ".."
 # Inline comments, reviews and issue comments draw ids from separate sequences
 # that can overlap, so review and issue rows get an offset added to their id.
 REVIEW_ID_OFFSET = 10**15
@@ -93,13 +98,22 @@ def gh_list(path: str, key: str | None = None) -> list[dict]:
     return [item for page in pages for item in (page[key] if key else page)]
 
 
-def load_shas() -> list[str]:
-    shas = []
-    for path in sorted(RAW_DIR.glob("*/transcript.json")):
-        for cp in json.loads(path.read_text()).get("checkpoints", []):
-            if cp.get("commitSha") and cp["commitSha"] not in shas:
-                shas.append(cp["commitSha"])
-    return shas
+def valid_shas(shas) -> list[str]:
+    """`shas` in order, without repeats or anything that isn't a hex commit id."""
+    return [s for s in dict.fromkeys(shas) if s and SHA.fullmatch(s)]
+
+
+def load_shas(conn: sqlite3.Connection) -> list[str]:
+    return valid_shas(r[0] for r in conn.execute("SELECT commit_sha FROM checkpoints ORDER BY session_id, ts"))
+
+
+def gh_problem() -> str | None:
+    """Why `gh` can't be used, or None when it is installed and logged in."""
+    if not shutil.which("gh"):
+        return "the gh CLI is not installed"
+    if subprocess.run(["gh", "auth", "status"], capture_output=True, check=False).returncode != 0:
+        return "gh is not logged in (run `gh auth login`)"
+    return None
 
 
 def is_bot(user: dict | None) -> int:
@@ -272,14 +286,14 @@ def fetch_checks_with_logs(pool: ThreadPoolExecutor, repo: str, shas: list[str],
 def refetch_checks(conn: sqlite3.Connection, repo: str, since: str, workers: int) -> None:
     """Re-list checks on stored commits tied to sessions active since `since`: their checkpoint
     commits and the heads of their PRs. Commits with no checks stored had none, so they are skipped."""
-    shas = sorted(stored(conn, """
+    shas = valid_shas(sorted(stored(conn, """
         SELECT DISTINCT k.commit_sha FROM gh_checks k WHERE k.commit_sha IN (
             SELECT cp.commit_sha FROM checkpoints cp JOIN sessions s ON s.session_id = cp.session_id
             WHERE s.last_activity_at >= :since
             UNION
             SELECT p.head_sha FROM gh_prs p JOIN gh_commit_prs g ON g.pr_number = p.pr_number
             JOIN checkpoints cp ON cp.commit_sha = g.commit_sha JOIN sessions s ON s.session_id = cp.session_id
-            WHERE s.last_activity_at >= :since)""", {"since": since}))
+            WHERE s.last_activity_at >= :since)""", {"since": since})))
     known = stored(conn, "SELECT check_id FROM gh_checks")
     logs = dict(conn.execute("SELECT check_id, failure_log FROM gh_checks WHERE failure_log IS NOT NULL"))
     print(f"re-listing checks on {len(shas)} commits of sessions active since {since}")
@@ -293,23 +307,31 @@ def refetch_checks(conn: sqlite3.Connection, repo: str, since: str, workers: int
     print(f"{requests} gh requests")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--repo", default="entireio/cli", help="GitHub owner/name")
+    parser.add_argument("--repo", required=True, help="GitHub owner/name the checkpoint commits belong to")
     parser.add_argument("--workers", type=int, default=8, help="Parallel gh calls")
     parser.add_argument("--refresh", action="store_true", help="Fetch everything, ignoring what is stored")
     parser.add_argument("--checks-since", metavar="YYYY-MM-DD",
                         help="Only re-list checks on stored commits of sessions active since this date")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     repo = args.repo
+    if not REPO.fullmatch(repo):
+        sys.exit(f"github: --repo must be owner/name, got {repo!r}")
 
     conn = db.connect()
     conn.executescript(SEEN_SCHEMA)
+    shas = load_shas(conn)
+    # Nothing to do is not an error: GitHub data is optional and the site hides what is missing.
+    skip = "no checkpoint commits to look up" if not shas else gh_problem()
+    if skip:
+        print(f"github: skipped, {skip}")
+        conn.close()
+        return
     if args.checks_since:
         refetch_checks(conn, repo, args.checks_since, args.workers)
         conn.close()
         return
-    shas = load_shas()
     if args.refresh:
         seen = settled = concluded = pending = set()
         logs = {}

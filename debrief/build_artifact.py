@@ -1,12 +1,13 @@
-"""Build the insights site as a Claude artifact in dist/artifact/.
+"""Build the debrief site as a Claude artifact in ARTIFACT_OUT.
 
 The host wraps the page in its own html/head/body, so page.html holds only the title, the
-Google Fonts links, the inlined CSS, the body markup and the inlined scripts. site/data/ is
-copied next to it as data/. Run export_site.py first.
+Google Fonts links, the inlined CSS, the body markup and the inlined scripts. The exported
+data/ is copied next to it. Run debrief.export_site first.
 
     uv run python -m debrief.build_artifact
 """
 
+import argparse
 import re
 import shutil
 import sys
@@ -49,9 +50,10 @@ def build_page() -> str:
     return "\n".join(parts) + "\n"
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter).parse_args(argv)
     if not (SITE_OUT / "data" / "index.json").exists():
-        sys.exit("build_artifact: site/data/index.json missing; run export_site.py first")
+        sys.exit(f"build_artifact: {SITE_OUT / 'data' / 'index.json'} missing; run debrief.export_site first")
     if OUT.exists():
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True)
