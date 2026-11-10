@@ -214,6 +214,7 @@ ADDED_COLUMNS = [
     # What the headless rule needs, kept so a re-run can apply it to a log without reading it.
     ("source_logs", "launcher", "TEXT"),         # as logged: Claude entrypoints, Codex "originator|source"; NULL in rows from before this column
     ("source_logs", "human_turns", "INTEGER"),   # after copied entries are left out; NULL when the log was not parsed
+    ("source_logs", "parser", "INTEGER"),        # normalize.PARSER_VERSION the log was last read with
     ("tool_calls", "exit_code", "INTEGER"),  # shell exit code when the format records one
     ("gh_prs", "merged_at", "TEXT"),
     ("gh_prs", "closed_at", "TEXT"),

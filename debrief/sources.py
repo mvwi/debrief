@@ -33,7 +33,7 @@ from functools import cache
 from pathlib import Path
 
 from debrief import db
-from debrief.normalize import PARSERS, read_jsonl, safe_session_id, write_log
+from debrief.normalize import PARSER_VERSION, PARSERS, read_jsonl, safe_session_id, write_log
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 CODEX_DIR = Path.home() / ".codex" / "sessions"
@@ -193,9 +193,9 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
         with conn:
             conn.execute(
                 "INSERT OR REPLACE INTO source_logs (path, session_id, agent, size, mtime, status, cwd, dropped,"
-                " launcher, human_turns) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " launcher, human_turns, parser) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (str(path), session_id, agent, stat.st_size, stat.st_mtime_ns, status, f["cwd"], dropped,
-                 f["launcher"], human_turns))
+                 f["launcher"], human_turns, PARSER_VERSION))
         return status
 
     turns = [e for e in entries if e.get("type") in ("user", "assistant")]
@@ -267,8 +267,10 @@ def sync(conn, claude_dir: Path | None = CLAUDE_DIR, codex_dir: Path | None = CO
                 counts["older than --since"] += 1
                 continue
             old = known.get(str(path))
-            # A row from before the launcher column existed says too little: read that log once more.
-            if old and old["launcher"] is not None and (old["size"], old["mtime"]) == (stat.st_size, stat.st_mtime_ns):
+            # A row from before the launcher column existed says too little, and one read by an
+            # older parser may hold rows the parser would no longer produce: read those logs once more.
+            if old and old["launcher"] is not None and old["parser"] == PARSER_VERSION and (
+                    old["size"], old["mtime"]) == (stat.st_size, stat.st_mtime_ns):
                 # Unchanged, so not read; but the rule and flags apply afresh to what the row records.
                 headless = is_headless(old["agent"], old["launcher"], old["human_turns"], include_headless)
                 if old["status"] == "loaded" and headless:

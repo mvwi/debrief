@@ -338,3 +338,90 @@ def test_unloading_a_session_clears_its_labels(conn, tmp_path):
     assert run(conn, tmp_path) == {"headless run": 1, "unchanged": 1}
     for table in ("turn_labels", "session_labels"):
         assert [r[0] for r in conn.execute(f"SELECT session_id FROM {table}")] == ["cli"]
+
+
+def bash(call_id: str, command: str, second: int) -> dict:
+    return {"sessionId": "sh", "cwd": "/work/app/pkg", "entrypoint": "cli", "type": "assistant", "uuid": call_id,
+            "timestamp": f"2026-01-05T10:00:{second:02}.000Z",
+            "message": {"id": call_id, "model": "claude-test-1",
+                        "content": [{"type": "tool_use", "id": call_id, "name": "Bash", "input": {"command": command}}]}}
+
+
+@pytest.mark.parametrize("command, files", [
+    ("cat > src/a.py <<'EOF'\nx = 1 > 2\necho hi > nope.txt\nEOF", ["/r/src/a.py"]),  # the body is data
+    ("cat <<EOF >> notes.md\nbody\nEOF\necho done", ["/r/notes.md"]),
+    ("echo hi | tee -a out.log other.log", ["/r/out.log", "/r/other.log"]),
+    ("sed -i '' -e 's/a/b/' x.py y.py", ["/r/x.py", "/r/y.py"]),
+    ("sed -i.bak 's/a > b/c/' pkg/x.py", ["/r/pkg/x.py"]),
+    ("sed -Ei 's/a/b/' x.py && git status", ["/r/x.py"]),
+    ("sed -n '1,5p' x.py", []),  # no -i: prints, does not write
+    ("echo a > one.txt\necho b >> two.txt", ["/r/one.txt", "/r/two.txt"]),
+    ("git log --format='%h > %s' > log.txt", ["/r/log.txt"]),  # a > inside quotes is not a redirect
+    ("cd /other/repo && echo x > a.txt", ["/other/repo/a.txt"]),
+    ("cd sub; printf 'a>b' >b.txt 2>/dev/null", ["/r/sub/b.txt"]),
+    ("echo x >> ~/.config/tool.toml", ["~/.config/tool.toml"]),
+    ("apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: lib/z.go\n@@\n-a\n+b > c\n*** End Patch\nEOF", ["/r/lib/z.go"]),
+    # Left out on purpose: no literal target, a scratch or device target, or a write the text does not name.
+    ('ls > "$OUT/x"; ls > /tmp/x; ls 2>&1 >/dev/null; echo $(date) > `x`', []),
+    ("python3 - <<'PY'\nopen('x','w').write('> y')\nPY", []),
+    ("cp a.py b.py && mv b.py c.py && git checkout -- d.py", []),
+    ("grep -c 'a' f | wc -l; test 3 -gt 2", []),
+    ("echo 'unclosed > x", []),
+    ("echo a > 'my notes.md'; echo b > out:1; echo c > x,y; echo d > .", []),  # not plainly one path
+])
+def test_shell_writes(command, files):
+    assert normalize.shell_writes(command, "/r") == files
+
+
+def test_shell_edits_count_as_writes_in_every_parser(conn, tmp_path):
+    """Session cwd is /work/app/pkg with no checkout on disk, so stored paths are relative to it."""
+    write(tmp_path / "claude/proj/sh.jsonl", [
+        *claude_entries("sh", [("u1", "edit by shell")], cwd="/work/app/pkg"),
+        bash("b1", "cat > new.py <<'EOF'\nprint(1)\nEOF", 40), bash("b2", "ls -la > /dev/null", 41),
+        bash("b3", "cd /work/app/pkg/sub && sed -i 's/a/b/' old.py", 42)])
+    patch = "*** Begin Patch\n*** Update File: lib/z.go\n@@\n-a\n+b\n*** End Patch"
+    codex = codex_entries("cx", "patch it")
+
+    def item(payload: dict) -> dict:
+        return {"timestamp": "2026-01-03T09:00:20.000Z", "type": "response_item", "payload": payload}
+    write(tmp_path / "codex/rollout-cx.jsonl", [*codex, *(item(p) for p in (
+        {"type": "function_call", "call_id": "f1", "name": "apply_patch", "arguments": json.dumps({"input": patch})},
+        {"type": "function_call", "call_id": "f2", "name": "exec_command",
+         "arguments": json.dumps({"cmd": "echo x | tee log.txt", "workdir": "/work/api/svc"})},
+        {"type": "function_call", "call_id": "f3", "name": "shell",
+         "arguments": json.dumps({"command": ["bash", "-lc", f"apply_patch <<'EOF'\n{patch}\nEOF"]})},
+        {"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": patch},
+        {"type": "custom_tool_call", "call_id": "c2", "name": "exec",
+         "input": 'const r = await tools.exec_command({cmd: "printf hi > docs/a.md", workdir: "/work/api"});'},
+        {"type": "custom_tool_call", "call_id": "c3", "name": "exec",
+         "input": "await tools.exec_command({cmd: `echo ${x} > skipped.md`});"}))])
+    write(tmp_path / "in/pi.jsonl", [
+        {"type": "session", "id": "pi1", "cwd": "/work/pi", "timestamp": "2026-01-04T08:00:00.000Z"},
+        {"type": "message", "id": "p1", "timestamp": "2026-01-04T08:00:01.000Z",
+         "message": {"role": "user", "content": [{"type": "text", "text": "pi prompt"}]}},
+        {"type": "message", "id": "p2", "timestamp": "2026-01-04T08:00:02.000Z", "message": {"role": "assistant", "content": [
+            {"type": "toolCall", "id": "t1", "name": "write", "arguments": {"path": "pkg/x_test.go", "content": "x"}},
+            {"type": "toolCall", "id": "t2", "name": "edit", "arguments": {"path": "/work/pi/pkg/x.go", "edits": []}},
+            {"type": "toolCall", "id": "t3", "name": "bash", "arguments": {"command": "echo v2 >> VERSION"}}]}}])
+    assert run(conn, tmp_path, import_dirs=[tmp_path / "in"])["loaded"] == 3
+
+    def calls(session_id: str) -> list[tuple]:
+        return [(r[0], json.loads(r[1]), r[2]) for r in conn.execute(
+            "SELECT name, files, writes FROM tool_calls WHERE session_id = ? AND name != 'Read' ORDER BY msg_idx, call_idx",
+            (session_id,))]
+    assert calls("sh") == [("Bash", ["new.py"], 1), ("Bash", [], 0), ("Bash", ["sub/old.py"], 1)]
+    assert calls("cx") == [
+        ("apply_patch", ["lib/z.go"], 1), ("exec_command", ["svc/log.txt"], 1), ("shell", ["lib/z.go"], 1),
+        ("apply_patch", ["lib/z.go"], 1), ("exec", ["docs/a.md"], 1), ("exec", [], 0)]
+    assert calls("pi1") == [("write", ["pkg/x_test.go"], 1), ("edit", ["pkg/x.go"], 1), ("bash", ["VERSION"], 1)]
+
+
+def test_a_parser_change_reaches_logs_that_have_not_changed(conn, tmp_path, monkeypatch):
+    write(tmp_path / "claude/proj/s1.jsonl", claude_entries("s1", [("u1", "first")]))
+    assert run(conn, tmp_path) == {"loaded": 1}
+    assert run(conn, tmp_path) == {"unchanged": 1}
+    monkeypatch.setattr(sources, "PARSER_VERSION", sources.PARSER_VERSION + 1)
+    assert run(conn, tmp_path) == {"loaded": 1}
+    assert run(conn, tmp_path) == {"unchanged": 1}
+    conn.execute("UPDATE source_logs SET parser = NULL")  # a home from before the column existed
+    assert run(conn, tmp_path) == {"loaded": 1}
