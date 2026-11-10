@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 
 from debrief import config, skills
 from debrief.db import connect, repo_projects, session_projects
@@ -560,7 +561,8 @@ def volume(conn, ids: set[str]) -> dict:
 
 
 def projects_section(conn, picked: set[str]) -> list[dict]:
-    """Every project, picked or not, biggest first: its size, and when synthesize last finished it."""
+    """Every project with sessions, picked or not, biggest first: its size, and when synthesize
+    last finished a pass over it."""
     project = session_projects(conn)
     turns = dict(conn.execute("SELECT session_id, COUNT(*) FROM messages WHERE role = 'user' AND user_kind = 'human' "
                               "GROUP BY session_id"))
@@ -568,10 +570,14 @@ def projects_section(conn, picked: set[str]) -> list[dict]:
     out: dict[str, dict] = {}
     for sid, p in project.items():
         if p:
-            row = out.setdefault(p, {"path": p, "sessions": 0, "turns": 0, "picked": p in picked,
-                                     "analysed": analysed.get(p)})
+            row = out.setdefault(p, {"path": p, "name": Path(p).name or p, "sessions": 0, "turns": 0,
+                                     "picked": p in picked, "analysed_at": analysed.get(p)})
             row["sessions"] += 1
             row["turns"] += turns.get(sid, 0)
+    names = Counter(r["name"] for r in out.values())
+    for r in out.values():
+        if names[r["name"]] > 1:  # two folders with one name show their parent too
+            r["name"] = "/".join(Path(r["path"]).parts[-2:])
     return sorted(out.values(), key=lambda r: (-r["sessions"], r["path"]))
 
 

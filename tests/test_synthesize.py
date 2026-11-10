@@ -218,8 +218,8 @@ def test_recommend_calls_once_per_project_and_once_across(conn):
     two_projects(conn)
     synthesize.save_findings(conn, "r1", "hotspot", [
         {"title": "big", "evidence": [], "project": "/w/big"}, {"title": "local", "evidence": [], "project": "/w/local"},
-        {"title": "habit", "evidence": []}], "now")
-    groups = recommend.groups(recommend.load_findings(conn, "r1"))
+        {"title": "habit", "evidence": []}, {"title": "unpicked", "evidence": [], "project": "/w/small"}], "now")
+    groups = recommend.groups(recommend.load_findings(conn, "r1"), PICKED)
     assert {p: [f["title"] for f in fs] for p, fs in groups.items()} == {
         "/w/big": ["big"], "/w/local": ["local"], None: ["habit"]}
     own = json.loads(recommend.prompt(conn, "/w/big", groups["/w/big"]))

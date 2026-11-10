@@ -142,7 +142,6 @@ How they compare, measured on the prototype's data with no human-labeled set beh
 - A session's project is the folder it ran in, or the project of the repo it opened a PR in.
   A session run in a worktree that ingest did not trace to its repo, and that opened no PR,
   shows up as a project of its own, named after the worktree folder.
-- `sync` still asks GitHub about the pull requests of every session, picked or not.
 - A picked project that has not been synced yet shows in the report with no labels.
 - "How it works" describes the whole run; the project picker does not scope its numbers.
 - Labels vary between runs: on a set of hard cases Haiku changed its answer on about 15% of

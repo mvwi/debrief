@@ -23,6 +23,7 @@ def conn(tmp_path, monkeypatch):
     connect = db.connect
     path = tmp_path / "debrief.db"
     monkeypatch.setattr(db, "connect", lambda: connect(path))
+    monkeypatch.setattr("debrief.config.projects", lambda: ["/work/widgets", "/work/gears"])  # both picked
     return connect(path)
 
 
@@ -194,7 +195,7 @@ def test_local_sessions_fetch_every_repo_and_only_new_data_on_a_rerun(conn, tmp_
 def test_dry_run_and_empty_database_make_no_requests(conn, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(github.subprocess, "run", lambda *a, **k: pytest.fail("a subprocess was run"))
     github.main([])
-    assert capsys.readouterr().out.strip() == "github: skipped, no session pushed a branch or opened a pull request"
+    assert capsys.readouterr().out.strip() == "github: skipped, no session of a picked project pushed a branch or opened a pull request"
     conn.execute("INSERT INTO sessions (session_id, cwd) VALUES ('s1', '/work/widgets')")
     conn.execute("INSERT INTO tool_calls VALUES ('s1', 1, 0, 'Bash', ?, ?, 0, '[]', 0, 0)", (
         json.dumps({"command": "gh pr create --fill"}), "https://github.com/acme/widgets/pull/7"))
@@ -204,12 +205,23 @@ def test_dry_run_and_empty_database_make_no_requests(conn, tmp_path, monkeypatch
         "github: dry run, no requests made. 1 PRs named in the logs of 1 sessions, 0 pushed branches to look up, 1 repos")
 
 
+def test_only_repos_of_picked_projects_are_asked_about(conn, tmp_path, fake_gh, monkeypatch):
+    load_sessions(conn, tmp_path)
+    monkeypatch.setattr("debrief.config.projects", lambda: ["/work/gears"])
+    github.main([])
+    assert fake_gh and all(path == "graphql" or path.startswith("repos/acme/gears/") for path in fake_gh)
+    assert {r[0] for r in conn.execute("SELECT repo FROM session_prs")} == {"acme/gears"}
+    monkeypatch.setattr("debrief.config.projects", list)
+    del fake_gh[:]
+    github.main([])
+    assert fake_gh == []  # nothing picked: no requests
+
+
 def test_export_keys_prs_by_repo(conn, tmp_path, fake_gh, monkeypatch):
     load_sessions(conn, tmp_path)
     github.main([])
     monkeypatch.setattr(export_site, "connect", db.connect)  # the scratch database, as patched by `conn`
     monkeypatch.setattr(export_site, "SITE_OUT", tmp_path / "site")
-    monkeypatch.setattr(export_site.config, "projects", lambda: [r[0] for r in conn.execute("SELECT DISTINCT cwd FROM sessions")])
     export_site.main([])
     index = json.loads((tmp_path / "site" / "data" / "index.json").read_text())
     assert index["meta"]["has"]["github"] and index["meta"]["repo"] is None  # two repos: no single name
