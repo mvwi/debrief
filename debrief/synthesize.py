@@ -1,6 +1,11 @@
-"""Turn labels into findings: SQL rollups per finding kind, then one Claude call per kind.
+"""Turn labels into findings: SQL rollups per project and finding kind, then one Claude call per bundle.
 
-Rollups become evidence bundles (bundles/<run_id>/<kind>.json); Claude reads each
+Findings are built per project (db.session_projects), so each says which repo it is about.
+A project with MIN_PROJECT_TURNS human turns gets its own pass; the smaller ones share one
+pooled pass, where a finding is tied to a project when all its evidence comes from it.
+CROSS_KINDS are about the person, not a repo, and get one pass over every session.
+
+Rollups become evidence bundles (bundles/<run_id>/<pass>/<kind>.json); Claude reads each
 bundle and returns findings, which land in the findings table under a new run_id.
 Each bundle holds at most --max-evidence items; its counts cover all evidence.
 --since sets where evidence starts: messages by ts, CI failures by completed_at, review
@@ -13,7 +18,7 @@ Claude runs through headless Claude Code (`claude -p`, billed to the Claude subs
 default, or through OpenRouter with --llm openrouter.
 
 A bundle's hash (model + prompt + bundle) is saved in its file and in bundles/index.json.
-If the latest run for a kind came from the same hash, its findings are copied into the new
+If the latest run for a kind holds findings from the same hash, they are copied into the new
 run instead of calling the model (--force calls it anyway).
 
     uv run python -m debrief.synthesize --dry-run
@@ -43,7 +48,7 @@ from pathlib import Path
 import httpx
 
 from debrief.config import choose, load_env
-from debrief.db import connect
+from debrief.db import connect, repo_projects, session_projects
 from debrief.paths import BUNDLE_DIR
 from debrief.relay import is_relayed
 
@@ -54,6 +59,9 @@ CLAUDE_CODE_TIMEOUT = 900  # seconds per call
 CLAUDE_CODE_RETRIES = (30, 120)  # backoff before each retry, for rate and usage limits
 MAX_TOKENS = 8000
 KINDS = ["hotspot", "knowledge_gap", "found_not_filed", "correction_pattern", "prompt_practice", "ci", "review"]
+CROSS_KINDS = ["prompt_practice"]  # about the person's habits, not a repo: one pass over every session
+MIN_PROJECT_TURNS = 100  # human turns a project needs for findings of its own; smaller ones are pooled
+POOLED, CROSS = "smaller projects", "all projects"  # pass names, beside the project folders
 QUOTE_LEN = 400
 PER_SESSION = 5  # items from one session (or PR, or commit) before others get a turn
 HOTSPOT_FILES = 25
@@ -105,6 +113,73 @@ def mark_relayed(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM relayed")
     human = conn.execute("SELECT session_id, idx, text FROM messages WHERE role = 'user' AND user_kind = 'human'")
     conn.executemany("INSERT INTO relayed VALUES (?, ?)", [(s, i) for s, i, t in human.fetchall() if is_relayed(t)])
+
+
+# Tables the rollups read, and the column that says which pass a row belongs to.
+SCOPED = {"sessions": "session_id", "messages": "session_id", "turn_labels": "session_id",
+          "tool_calls": "session_id", "gh_checks": "repo", "gh_review_comments": "repo"}
+
+
+def scope(conn: sqlite3.Connection, sessions: set[str] | None = None, repos: set[str] = frozenset()) -> None:
+    """Limit what the rollups read to these sessions and repos; no sessions lifts the limit.
+
+    TEMP views named after the tables shadow them, so the rollup SQL stays as it is.
+    """
+    for table in SCOPED:
+        conn.execute(f"DROP VIEW IF EXISTS temp.{table}")
+    if sessions is None:
+        return
+    # Session ids and repo names (owner/name) share the table; neither can be mistaken for the other.
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS scope (id TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM scope")
+    conn.executemany("INSERT INTO scope VALUES (?)", [(x,) for x in {*sessions, *repos}])
+    for table, column in SCOPED.items():
+        conn.execute(f"CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} WHERE {column} IN (SELECT id FROM scope)")
+
+
+def passes(conn: sqlite3.Connection) -> list[dict]:
+    """One pass per project with MIN_PROJECT_TURNS human turns (biggest first), one for the
+    rest pooled, and one over everything for CROSS_KINDS."""
+    project, repos = session_projects(conn), repo_projects(conn)
+    turns: Counter = Counter(dict.fromkeys(project.values(), 0))
+    for sid, n in conn.execute("SELECT session_id, COUNT(*) FROM main.messages "
+                               "WHERE role = 'user' AND user_kind = 'human' GROUP BY session_id"):
+        turns[project.get(sid)] += n
+    alone = [p for p, n in turns.most_common() if p and n >= MIN_PROJECT_TURNS]
+    kinds = [k for k in KINDS if k not in CROSS_KINDS]
+
+    def members(projects: list) -> dict:
+        sessions = {s for s, p in project.items() if p in projects}
+        return {"sessions": sessions, "repos": {r for r, p in repos.items() if p in projects},
+                "turns": sum(turns[p] for p in projects), "kinds": kinds}
+
+    out = [{"name": p, "project": p, **members([p])} for p in alone]
+    pooled = [p for p in turns if p not in alone]
+    if pooled:
+        out.append({"name": POOLED, "project": None, "pooled": sorted(p for p in pooled if p), **members(pooled)})
+    return [*out, {"name": CROSS, "project": None, "sessions": None, "repos": set(), "kinds": CROSS_KINDS,
+                   "turns": sum(turns.values())}]
+
+
+EVENT_REPO = {"check_failure": "SELECT repo FROM main.gh_checks WHERE check_id = ?",
+              "review_comment": "SELECT repo FROM main.gh_review_comments WHERE comment_id = ?"}
+
+
+def evidence_project(conn: sqlite3.Connection, project: dict, repos: dict, evidence: list[dict]) -> str | None:
+    """The one project all of a finding's evidence comes from, or None when it spans several."""
+    found = set()
+    for ref in evidence:
+        if "session_id" in ref:
+            found.add(project.get(ref["session_id"]))
+        else:
+            row = conn.execute(EVENT_REPO[ref["event_type"]], (ref["event_id"],)).fetchone()
+            found.add(repos.get(row[0]) if row else None)
+    return found.pop() if len(found) == 1 else None
+
+
+def short_name(path: str) -> str:
+    """The last part of a project folder, for prompts and tables."""
+    return Path(path).name or path
 
 
 def excerpt(text: str | None, n: int = QUOTE_LEN, tail: bool = False) -> str:
@@ -646,8 +721,10 @@ KIND_HINTS = {
 }
 
 
-def user_prompt(kind: str, bundle: dict) -> str:
-    return f"Finding kind: {kind}\n{KIND_HINTS[kind]}\n\nEvidence bundle:\n{json.dumps(bundle, ensure_ascii=False)}"
+def user_prompt(kind: str, bundle: dict, about: str = "") -> str:
+    """about: a line saying which project the bundle covers; empty for a pass over everything."""
+    return (f"Finding kind: {kind}\n{KIND_HINTS[kind]}\n{about}\n"
+            f"Evidence bundle:\n{json.dumps(bundle, ensure_ascii=False)}")
 
 
 def canonical_model(model: str) -> str:
@@ -786,26 +863,34 @@ def load_index() -> dict:
         return {}
 
 
-def cached_run(conn: sqlite3.Connection, index: dict, digest: str, kind: str) -> str | None:
-    """The run whose findings came from this exact prompt, if it is still the latest run for kind."""
+def cached_run(conn: sqlite3.Connection, index: dict, digest: str, kind: str, name: str = CROSS) -> dict | None:
+    """The index entry whose findings came from this exact prompt, if its run is still the latest for kind.
+
+    The entry gains "ids", its findings' ids. An entry from before passes existed has no
+    "pass" and covers every finding of its kind in its run.
+    """
     entry = index.get(digest)
-    if not entry or entry["kind"] != kind:
+    if not entry or entry["kind"] != kind or entry.get("pass", CROSS) != name:
         return None
-    count = conn.execute("SELECT COUNT(*) FROM findings WHERE run_id = ? AND kind = ?",
-                         (entry["run_id"], kind)).fetchone()[0]
+    ids = entry["ids"] if "ids" in entry else [r[0] for r in conn.execute(
+        "SELECT finding_id FROM findings WHERE run_id = ? AND kind = ?", (entry["run_id"], kind))]
+    count = conn.execute(f"SELECT COUNT(*) FROM findings WHERE run_id = ? AND kind = ? "
+                         f"AND finding_id IN ({','.join('?' * len(ids))})", (entry["run_id"], kind, *ids)).fetchone()[0]
     latest = conn.execute("SELECT MAX(run_id) FROM findings WHERE kind = ?", (kind,)).fetchone()[0]
     if count != entry["findings"] or (latest and latest > entry["run_id"]):
         return None
-    return entry["run_id"]
+    return {**entry, "ids": ids}
 
 
-def save_findings(conn: sqlite3.Connection, run_id: str, kind: str, findings: list[dict], now: str) -> None:
-    conn.executemany(
-        "INSERT INTO findings (run_id, kind, title, detail, suggested_fix, evidence, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [(run_id, kind, f.get("title"), f.get("detail"), f.get("suggested_fix"),
-          json.dumps(f["evidence"]), now) for f in findings])
+def save_findings(conn: sqlite3.Connection, run_id: str, kind: str, findings: list[dict], now: str) -> list[int]:
+    """Insert findings, each with its "project" (None: it spans projects); returns their ids."""
+    ids = [conn.execute(
+        "INSERT INTO findings (run_id, kind, title, detail, suggested_fix, evidence, project, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, kind, f.get("title"), f.get("detail"), f.get("suggested_fix"),
+         json.dumps(f["evidence"]), f.get("project"), now)).lastrowid for f in findings]
     conn.commit()
+    return ids
 
 
 # --- main ------------------------------------------------------------------------------
@@ -833,7 +918,7 @@ def main(argv: list[str] | None = None) -> None:
                              "Default: [synthesize] in config.toml, else claude-code")
     parser.add_argument("--parallel", type=int,
                         help="Concurrent model calls (default 2 for claude-code, which shares subscription "
-                             "limits; one per kind for openrouter)")
+                             "limits; one per bundle for openrouter)")
     parser.add_argument("--dry-run", action="store_true", help="Build bundles and print them; no model call")
     parser.add_argument("--force", action="store_true", help="Call the model even when a bundle is cached")
     parser.add_argument("--db", type=Path, help="Database path (default debrief.db)")
@@ -850,44 +935,66 @@ def main(argv: list[str] | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     index = load_index()
 
-    bundles, prompts, digests, cached = {}, {}, {}, {}
+    project, repos = session_projects(conn), repo_projects(conn)
+    # Every dict below is keyed by (pass name, kind).
+    bundles, prompts, digests, cached, of_pass = {}, {}, {}, {}, {}
     todo_tokens = 0
-    print(f"{'kind':<20} {'items':>11} {'refs':>5} {'~tokens':>8} {'~cost':>8}")
-    for kind in [args.kind] if args.kind else KINDS:
-        if why := missing_data(conn, kind):
-            print(f"{kind:<20} skipped: {why}")
+    for i, p in enumerate(passes(conn)):
+        kinds = [k for k in p["kinds"] if args.kind in (None, k)]
+        if not kinds:
             continue
-        bundle = bundles[kind] = ROLLUPS[kind](conn, args.min_confidence, args.max_evidence, args.since)
-        user = prompts[kind] = user_prompt(kind, bundle)
-        digest = digests[kind] = prompt_hash(model, user)
-        (out / f"{kind}.json").write_text(json.dumps(
-            {"kind": kind, "model": model, "hash": digest, "bundle": bundle}, indent=2, ensure_ascii=False))
-        tokens = (len(SYSTEM) + len(user)) // 4
-        cost = "sub" if subscription else f"${tokens * price:.3f}" if price is not None else "?"
-        note = ""
-        if not bundle_refs(bundle):
-            note = "  skipped: no evidence, nothing to send"
-        elif not args.force and (hit := cached_run(conn, index, digest, kind)):
-            cached[kind] = hit
-            note = f"  cached from {hit}"
-        else:
-            todo_tokens += tokens
-        items = f"{bundle['totals']['shown']}/{bundle['totals']['items']}"
-        print(f"{kind:<20} {items:>11} {len(bundle_refs(bundle)):>5} {tokens:>8} {cost:>8}{note}")
+        name = p["name"]
+        where = f"{len(p['sessions'])} sessions, " if p["sessions"] is not None else ""
+        print(f"\n== {short_name(name)}: {where}{p['turns']} human turns")
+        if p.get("pooled"):
+            print(f"   pooled: {', '.join(short_name(x) for x in p['pooled'])}")
+        about = (f"Project: {short_name(name)}\n" if p["project"] else
+                 "Projects: several small ones, pooled.\n" if name == POOLED else "")
+        scope(conn, p["sessions"], p["repos"])
+        print(f"{'kind':<20} {'items':>11} {'refs':>5} {'~tokens':>8} {'~cost':>8}")
+        for kind in kinds:
+            if why := missing_data(conn, kind):
+                print(f"{kind:<20} skipped: {why}")
+                continue
+            key = (name, kind)
+            of_pass[key] = p
+            bundle = bundles[key] = ROLLUPS[kind](conn, args.min_confidence, args.max_evidence, args.since)
+            user = prompts[key] = user_prompt(kind, bundle, about)
+            digest = digests[key] = prompt_hash(model, user)
+            folder = out / f"{i:02d}-{short_name(name).replace(' ', '-')}"
+            folder.mkdir(exist_ok=True)
+            (folder / f"{kind}.json").write_text(json.dumps(
+                {"kind": kind, "pass": name, "model": model, "hash": digest, "bundle": bundle},
+                indent=2, ensure_ascii=False))
+            tokens = (len(SYSTEM) + len(user)) // 4
+            cost = "sub" if subscription else f"${tokens * price:.3f}" if price is not None else "?"
+            note = ""
+            if not bundle_refs(bundle):
+                note = "  skipped: no evidence, nothing to send"
+            elif not args.force and (hit := cached_run(conn, index, digest, kind, name)):
+                cached[key] = hit
+                note = f"  cached from {hit['run_id']}"
+            else:
+                todo_tokens += tokens
+            items = f"{bundle['totals']['shown']}/{bundle['totals']['items']}"
+            print(f"{kind:<20} {items:>11} {len(bundle_refs(bundle)):>5} {tokens:>8} {cost:>8}{note}")
+    scope(conn)
+    todo = {k: p for k, p in prompts.items() if bundle_refs(bundles[k]) and k not in cached}
+    print(f"\n{len(todo)} model calls, {len(cached)} cached")
     if subscription:
         print(f"~{todo_tokens} input tokens to send to {model} via claude -p (subscription)")
     elif price is None:
         print(f"~{todo_tokens} input tokens to send ({model} price unavailable)")
     else:
         print(f"~{todo_tokens} input tokens to send, ~${todo_tokens * price:.2f} at {model} input price "
-              f"(output extra, at most {MAX_TOKENS} tokens per kind)")
+              f"(output extra, at most {MAX_TOKENS} tokens per call)")
     print(f"bundles in {out}")
 
     if args.dry_run:
         if not bundles:
             return
-        kind = args.kind or max(bundles, key=lambda k: len(bundle_refs(bundles[k])))
-        print(f"\n--- {kind} ---\n{json.dumps(bundles[kind], indent=2, ensure_ascii=False)[:6000]}")
+        key = max(bundles, key=lambda k: len(bundle_refs(bundles[k])))
+        print(f"\n--- {short_name(key[0])}: {key[1]} ---\n{json.dumps(bundles[key], indent=2, ensure_ascii=False)[:6000]}")
         return
 
     if subscription:
@@ -899,40 +1006,50 @@ def main(argv: list[str] | None = None) -> None:
         if not key:
             sys.exit("OPENROUTER_API_KEY is not set")
         ask = partial(ask_openrouter, model=model, key=key)
-    todo = {k: p for k, p in prompts.items() if bundle_refs(bundles[k]) and k not in cached}
     now = datetime.now(UTC).isoformat()
     total, cost = 0, 0.0
 
-    for kind, source in cached.items():
+    def entry(key: tuple, ids: list[int]) -> dict:
+        return {"run_id": run_id, "kind": key[1], "pass": key[0], "findings": len(ids), "ids": ids}
+
+    for key, source in cached.items():
+        marks = ",".join("?" * len(source["ids"]))
+        last = conn.execute("SELECT COALESCE(MAX(finding_id), 0) FROM findings").fetchone()[0]
         conn.execute(
-            "INSERT INTO findings (run_id, kind, title, detail, suggested_fix, evidence, created_at) "
-            "SELECT ?, kind, title, detail, suggested_fix, evidence, ? FROM findings "
-            "WHERE run_id = ? AND kind = ? ORDER BY finding_id", (run_id, now, source, kind))
+            "INSERT INTO findings (run_id, kind, title, detail, suggested_fix, evidence, project, created_at) "
+            "SELECT ?, kind, title, detail, suggested_fix, evidence, project, ? FROM findings "
+            f"WHERE finding_id IN ({marks}) ORDER BY finding_id", (run_id, now, *source["ids"]))
         conn.commit()
-        n = conn.execute("SELECT COUNT(*) FROM findings WHERE run_id = ? AND kind = ?", (run_id, kind)).fetchone()[0]
-        index[digests[kind]] = {"run_id": run_id, "kind": kind, "findings": n}
-        total += n
-        print(f"{kind}: {n} findings copied from {source}")
+        ids = [r[0] for r in conn.execute("SELECT finding_id FROM findings WHERE finding_id > ?", (last,))]
+        index[digests[key]] = entry(key, ids)
+        total += len(ids)
+        print(f"{short_name(key[0])}: {key[1]}: {len(ids)} findings copied from {source['run_id']}")
 
     workers = args.parallel or (2 if subscription else len(todo)) or 1
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {k: pool.submit(ask, p) for k, p in todo.items()}
-    for kind, fut in futures.items():
+    for key, fut in futures.items():
+        kind, label = key[1], f"{short_name(key[0])}: {key[1]}"
         try:
             raw, usage = fut.result()
-            findings = check_evidence(kind, raw, bundle_refs(bundles[kind]))
+            findings = check_evidence(kind, raw, bundle_refs(bundles[key]))
         except (httpx.HTTPError, ClaudeCodeError, json.JSONDecodeError, KeyError) as e:
-            print(f"{kind}: failed: {e}")
+            print(f"{label}: failed: {e}")
             continue
-        save_findings(conn, run_id, kind, findings, now)
-        index[digests[kind]] = {"run_id": run_id, "kind": kind, "findings": len(findings)}
+        p = of_pass[key]
+        for f in findings:
+            # A pooled finding belongs to a project when all its evidence does.
+            f["project"] = p["project"] or (
+                evidence_project(conn, project, repos, f["evidence"]) if key[0] == POOLED else None)
+        index[digests[key]] = entry(key, save_findings(conn, run_id, kind, findings, now))
         total += len(findings)
         cost += usage["cost"]
         took = f", {usage['seconds']}s" if "seconds" in usage else ""
-        print(f"{kind}: {len(findings)} findings, {usage['in']} in / {usage['out']} out tokens, "
+        print(f"{label}: {len(findings)} findings, {usage['in']} in / {usage['out']} out tokens, "
               f"${usage['cost']:.4f}{took}")
         for f in findings:
-            print(f"[{kind}] {f.get('title')}  ({len(f['evidence'])} refs)\n    fix: {f.get('suggested_fix')}")
+            where = f" {short_name(f['project'])}" if f["project"] else ""
+            print(f"[{kind}{where}] {f.get('title')}  ({len(f['evidence'])} refs)\n    fix: {f.get('suggested_fix')}")
     INDEX_PATH.write_text(json.dumps(index, indent=2))
     # Claude Code reports what the call would cost at API prices; the subscription pays instead.
     billed = f"~${cost:.4f} API-equivalent, billed to subscription" if subscription else f"${cost:.4f}"

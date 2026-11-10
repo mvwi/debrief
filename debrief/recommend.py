@@ -1,7 +1,9 @@
 """Merge one findings run into recommendations, grouped by the lever that fixes them.
 
-Findings come per pipeline kind (hotspot, ci, ...), so one problem can show up under
-several kinds. One Claude call reads every finding in a run and returns recommendations:
+Findings come per project and pipeline kind (hotspot, ci, ...), so one problem can show up
+under several kinds. Each project with its own synthesis pass gets one Claude call over its
+findings; the rest (small projects and findings that span projects) share one. An idea from
+the shared call belongs to a project when all its findings do. A call returns recommendations:
 each names the lever (where the fix lives), the change to make, its effort, and the
 findings it covers. Every finding lands in exactly one recommendation, except that a finding
 listing several bugs may back one backlog recommendation per bug; any the model leaves out become their own.
@@ -15,11 +17,12 @@ import json
 import re
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from debrief.config import choose, load_env
-from debrief.db import connect
-from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json
+from debrief.db import connect, session_projects
+from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json, passes, short_name
 
 LEVERS = {
     "agent_config": "Agent instructions: CLAUDE.md, AGENTS.md, skills, slash commands",
@@ -44,6 +47,10 @@ Each finding came from labeled agent sessions and, when the data has them, CI ch
 comments, and cites evidence.
 Several findings often describe one problem from different angles (a hotspot file, a correction
 pattern and a knowledge gap can all be the same missing doc). Merge those.
+
+Projects: "project" on the input says every finding is about that one repo. Otherwise each finding
+carries its own "project", or null when it is about several repos or about the person's habits. Never merge
+findings from different projects into one idea, unless the idea is about habits and names no repo.
 
 Levers (where the fix lives):
 {chr(10).join(f"- {k}: {v}" for k, v in LEVERS.items())}
@@ -78,6 +85,8 @@ Rules:
 - "impact" is one neutral line saying what the problem is and where it shows up, with no numbers at all
   (e.g. "People paste review bot findings into the session by hand, across several sessions").
   Don't promise an outcome ("removes", "saves").
+- "target" starts with the project's name and a colon when the idea is about one project
+  ("canopy: CLAUDE.md", "canopy: .github/workflows/ci.yml"); no prefix when it is not.
 - effort: S (under an hour), M (a day or less), L (more).
 - Plain, short sentences. No hype. Do not invent facts that are not in the findings.
 
@@ -114,14 +123,41 @@ def load_findings(conn, run_id: str) -> list[dict]:
     for r in conn.execute("SELECT * FROM findings WHERE run_id = ? ORDER BY finding_id", (run_id,)):
         evidence = json.loads(r["evidence"] or "[]")
         out.append({"id": r["finding_id"], "kind": r["kind"], "title": r["title"], "detail": r["detail"],
-                    "suggested_fix": r["suggested_fix"], "evidence": evidence_stats(conn, evidence)})
+                    "suggested_fix": r["suggested_fix"], "evidence": evidence_stats(conn, evidence),
+                    "project": r["project"]})
     return out
 
 
-def team_context(conn) -> dict:
-    sessions, people = conn.execute("SELECT COUNT(*), COUNT(DISTINCT author) FROM sessions").fetchone()
-    human = conn.execute("SELECT COUNT(*) FROM messages WHERE role = 'user' AND user_kind = 'human'").fetchone()[0]
-    return {"sessions": sessions, "people": people, "human_turns": human}
+def team_context(conn, project: str | None = None) -> dict:
+    """Sessions, people and human turns: in one project, or in all of them."""
+    ids = [s for s, p in session_projects(conn).items() if project in (None, p)]
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS team (session_id TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM team")
+    conn.executemany("INSERT INTO team VALUES (?)", [(s,) for s in ids])
+    people = conn.execute("SELECT COUNT(DISTINCT author) FROM sessions JOIN team USING (session_id)").fetchone()[0]
+    human = conn.execute("SELECT COUNT(*) FROM messages JOIN team USING (session_id) "
+                         "WHERE role = 'user' AND user_kind = 'human'").fetchone()[0]
+    return {"sessions": len(ids), "people": people, "human_turns": human}
+
+
+def groups(conn, findings: list[dict]) -> dict[str | None, list[dict]]:
+    """Findings per model call: one per project that had its own synthesis pass, then the rest under None."""
+    alone = [p["project"] for p in passes(conn) if p["project"]]
+    out: dict[str | None, list[dict]] = {}
+    for f in findings:
+        out.setdefault(f["project"] if f["project"] in alone else None, []).append(f)
+    return dict(sorted(out.items(), key=lambda kv: alone.index(kv[0]) if kv[0] else len(alone)))
+
+
+def prompt(conn, project: str | None, findings: list[dict]) -> str:
+    """The user message for one call. Projects go by folder name; the full path stays here."""
+    if project:
+        body = {"team": team_context(conn, project), "project": short_name(project),
+                "findings": [{k: v for k, v in f.items() if k != "project"} for f in findings]}
+    else:
+        body = {"team": team_context(conn),
+                "findings": [{**f, "project": f["project"] and short_name(f["project"])} for f in findings]}
+    return json.dumps(body, ensure_ascii=False)
 
 
 # A backlog idea that reads like a list of bugs rather than one.
@@ -168,20 +204,24 @@ def check(recs: list[dict], findings: list[dict]) -> list[dict]:
             kept.append({"lever": KIND_LEVER.get(f["kind"], "agent_config"), "title": f["title"],
                          "problem": f["detail"], "change": f["suggested_fix"], "target": "", "effort": "M",
                          "impact": "", "finding_ids": [f["id"]]})
-    # The UI sorts by reach; priority just keeps the model's order.
-    for i, r in enumerate(kept, 1):
-        r["priority"] = i
+    for r in kept:
+        # An idea is about a project when all its findings are.
+        projects = {by_id[i]["project"] for i in r["finding_ids"]}
+        r["project"] = projects.pop() if len(projects) == 1 else None
     return kept
 
 
 def save(conn, run_id: str, recs: list[dict]) -> None:
     now = datetime.now(UTC).isoformat()
+    # The UI sorts by reach; priority just keeps the order the ideas came in.
+    for i, r in enumerate(recs, 1):
+        r["priority"] = i
     conn.execute("DELETE FROM recommendations WHERE run_id = ?", (run_id,))
     conn.executemany(
         "INSERT INTO recommendations (run_id, priority, lever, title, problem, change, target, effort, impact, "
-        "finding_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "finding_ids, project, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [(run_id, r["priority"], r["lever"], r.get("title"), r.get("problem"), r.get("change"), r.get("target"),
-          r.get("effort"), r.get("impact"), json.dumps(r["finding_ids"]), now) for r in recs])
+          r.get("effort"), r.get("impact"), json.dumps(r["finding_ids"]), r.get("project"), now) for r in recs])
     conn.commit()
 
 
@@ -196,27 +236,40 @@ def main(argv: list[str] | None = None) -> None:
     run_id = args.run or latest_run(conn)
     if not run_id:
         sys.exit("no findings yet; run synthesize.py")
-    findings = load_findings(conn, run_id)
-    user = json.dumps({"team": team_context(conn), "findings": findings}, ensure_ascii=False)
-    print(f"run {run_id}: {len(findings)} findings, ~{(len(SYSTEM) + len(user)) // 4} input tokens")
+    prompts = {p: (fs, prompt(conn, p, fs)) for p, fs in groups(conn, load_findings(conn, run_id)).items()}
+    print(f"run {run_id}: {len(prompts)} model calls")
+    for p, (fs, user) in prompts.items():
+        print(f"  {short_name(p) if p else 'other projects and across projects'}: {len(fs)} findings, "
+              f"~{(len(SYSTEM) + len(user)) // 4} input tokens")
     if args.dry_run:
-        print(user[:4000])
+        print(next(iter(prompts.values()), ("", ""))[1][:4000])
         return
     if not shutil.which("claude"):
         sys.exit("claude (Claude Code) is not on PATH")
 
     _, model = choose("recommend")
-    try:
-        raw, usage = ask_claude_code(user, model, system=SYSTEM,
-                                     parse=lambda t: parse_json(t).get("recommendations", []))
-    except ClaudeCodeError as e:
-        sys.exit(f"failed: {e}")
-    recs = check(raw, findings)
+    with ThreadPoolExecutor(max_workers=2) as pool:  # 2, as in synthesize: the calls share subscription limits
+        futures = {p: pool.submit(ask_claude_code, user, model, system=SYSTEM,
+                                  parse=lambda t: parse_json(t).get("recommendations", []))
+                   for p, (_, user) in prompts.items()}
+    recs, tokens_in, tokens_out, cost, failed = [], 0, 0, 0.0, 0
+    for p, fut in futures.items():
+        try:
+            raw, usage = fut.result()
+        except ClaudeCodeError as e:
+            # Keep the run whole: a group the model failed on still gets one idea per finding.
+            print(f"{short_name(p) if p else 'other projects'}: failed: {e}")
+            raw, usage, failed = [], {"in": 0, "out": 0, "cost": 0}, failed + 1
+            if failed == len(futures):
+                sys.exit("failed: no call succeeded; recommendations left as they were")
+        recs += check(raw, prompts[p][0])
+        tokens_in, tokens_out, cost = tokens_in + (usage["in"] or 0), tokens_out + (usage["out"] or 0), cost + usage["cost"]
     save(conn, run_id, recs)
-    print(f"{len(recs)} recommendations saved for run {run_id} ({usage['in']} in / {usage['out']} out tokens, "
-          f"~${usage['cost']:.4f} API-equivalent)")
+    print(f"{len(recs)} recommendations saved for run {run_id} ({tokens_in} in / {tokens_out} out tokens, "
+          f"~${cost:.4f} API-equivalent)")
     for r in recs:
-        print(f"{r['priority']:>2}. [{r['lever']}/{r.get('effort')}] {r['title']}  <- {r['finding_ids']}")
+        where = f" {short_name(r['project'])}" if r["project"] else ""
+        print(f"{r['priority']:>2}. [{r['lever']}/{r.get('effort')}{where}] {r['title']}  <- {r['finding_ids']}")
 
 
 if __name__ == "__main__":
