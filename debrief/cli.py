@@ -9,9 +9,11 @@ Everything is kept under DEBRIEF_HOME (default ~/.local/share/debrief).
 """
 
 import argparse
+import contextlib
 import functools
 import http.server
 import importlib
+import io
 import sys
 import webbrowser
 
@@ -55,7 +57,12 @@ def sync(argv: list[str]) -> None:
 
     stage("ingest", ingest)
     if args.dry_run:
-        stage("label", [f"--llm={args.llm}", "--dry-run"])
+        # The label dry run also prints sample prompts; keep only its count and estimate.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            stage("label", [f"--llm={args.llm}", "--dry-run"])
+        lines = out.getvalue().splitlines()
+        print("\n".join(line for line in lines if line.startswith(("== ", "=== ", "would label"))))
         return
     stage("label", [f"--llm={args.llm}"])
     stage("synthesize", [f"--llm={args.llm}", *since])
