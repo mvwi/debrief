@@ -211,6 +211,9 @@ CREATE TABLE IF NOT EXISTS evidence_checks (
 # tables, so connect() adds any that are missing.
 ADDED_COLUMNS = [
     ("sessions", "cwd", "TEXT"),
+    # What the headless rule needs, kept so a re-run can apply it to a log without reading it.
+    ("source_logs", "launcher", "TEXT"),         # as logged: Claude entrypoints, Codex "originator|source"; NULL in rows from before this column
+    ("source_logs", "human_turns", "INTEGER"),   # after copied entries are left out; NULL when the log was not parsed
     ("tool_calls", "exit_code", "INTEGER"),  # shell exit code when the format records one
     ("gh_prs", "merged_at", "TEXT"),
     ("gh_prs", "closed_at", "TEXT"),

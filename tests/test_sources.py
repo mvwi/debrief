@@ -258,3 +258,70 @@ def test_entire_folders_still_load(conn, tmp_path):
     assert normalize.load_session(conn, folder).startswith("loaded e1")
     assert tuple(conn.execute("SELECT display_name, checkpoint_count FROM sessions").fetchone()) == ("Entire one", 1)
     assert conn.execute("SELECT checkpoint_id FROM messages WHERE idx = 0").fetchone()[0] == "cp1"
+
+
+def session_ids(conn) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT session_id FROM sessions ORDER BY 1")]
+
+
+def test_headless_flag_applies_to_unchanged_logs_in_both_directions(conn, tmp_path, monkeypatch):
+    write(tmp_path / "claude/proj/a-job.jsonl", claude_entries("a-job", [("u1", "shared prompt")], entrypoint="sdk-cli"))
+    write(tmp_path / "claude/proj/sdk.jsonl", claude_entries("sdk", [("j1", "one prompt")], entrypoint="sdk-ts"))
+    write(tmp_path / "codex/rollout-app.jsonl", codex_entries("app", "handle this PR", originator="some-app"))
+    # A person's session that starts with a copy of the headless run's turn, then adds one.
+    write(tmp_path / "claude/proj/real.jsonl", [*claude_entries("a-job", [("u1", "shared prompt")]),
+                                              *claude_entries("real", [("u2", "typed here")])])
+    fresh = db.connect(tmp_path / "fresh.db")
+    assert run(fresh, tmp_path) == {"headless run": 3, "loaded": 1}
+    expected = human_turns(fresh)
+    assert expected == [("real", "shared prompt"), ("real", "typed here")]
+
+    assert run(conn, tmp_path, include_headless=True)["loaded"] == 4
+    assert human_turns(conn).count(("a-job", "shared prompt")) == 1 and ("real", "shared prompt") not in human_turns(conn)
+
+    # Flag off: the three go, without their logs being read, and the copy's turn comes back to "real".
+    real_read = sources.read_jsonl
+    monkeypatch.setattr(sources, "read_jsonl", lambda path, **k: real_read(path, **k) if path.name == "real.jsonl"
+                        else pytest.fail(f"read unchanged {path.name}"))
+    assert run(conn, tmp_path) == {"headless run": 3, "unchanged": 1, "reloaded without copied entries": 1}
+    monkeypatch.undo()
+    assert human_turns(conn) == expected and session_ids(conn) == ["real"]
+    assert conn.execute("SELECT COUNT(*) FROM source_entries WHERE session_id != 'real'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM tool_calls WHERE session_id != 'real'").fetchone()[0] == 0
+
+    # Flag on again: they load from logs that have not changed. Off again: back to the fresh state.
+    run(conn, tmp_path, include_headless=True)
+    assert session_ids(conn) == ["a-job", "app", "real", "sdk"]
+    run(conn, tmp_path)
+    assert human_turns(conn) == expected and run(conn, tmp_path) == {"headless run": 3, "unchanged": 1}
+
+
+def test_a_home_from_before_the_launcher_column_is_read_once_more(tmp_path):
+    """Such a home holds wrapper-app sessions loaded under an older rule, and rows that do not say who started them."""
+    write(tmp_path / "codex/rollout-app.jsonl", codex_entries("app", "handle this PR", originator="some-app"))
+    write(tmp_path / "claude/proj/s1.jsonl", claude_entries("s1", [("u1", "real work")]))
+    path = tmp_path / "old.db"
+    conn = db.connect(path)
+    run(conn, tmp_path, include_headless=True)
+    conn.execute("ALTER TABLE source_logs DROP COLUMN launcher")
+    conn.execute("ALTER TABLE source_logs DROP COLUMN human_turns")
+    conn.commit()
+    conn.close()
+
+    conn = db.connect(path)  # adds the columns back, empty
+    assert session_ids(conn) == ["app", "s1"]
+    assert run(conn, tmp_path) == {"headless run": 1, "loaded": 1}
+    assert session_ids(conn) == ["s1"]
+    assert run(conn, tmp_path) == {"headless run": 1, "unchanged": 1}
+
+
+def test_a_change_to_the_rule_itself_applies_to_unchanged_logs(conn, tmp_path, monkeypatch):
+    write(tmp_path / "claude/proj/sdk.jsonl", claude_entries("sdk", [("j1", "a"), ("j2", "b")], entrypoint="sdk-ts"))
+    write(tmp_path / "claude/proj/cli.jsonl", claude_entries("cli", [("u1", "c")]))
+    assert run(conn, tmp_path) == {"loaded": 2}
+    monkeypatch.setattr(sources, "SDK_MIN_TURNS", 3)
+    assert run(conn, tmp_path) == {"headless run": 1, "unchanged": 1}
+    monkeypatch.setattr(sources, "HEADLESS_CLAUDE", {"sdk-cli", "cli"})  # the launcher is stored as logged
+    assert run(conn, tmp_path) == {"headless run": 2}
+    monkeypatch.undo()
+    assert run(conn, tmp_path) == {"loaded": 2} and session_ids(conn) == ["cli", "sdk"]
