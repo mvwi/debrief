@@ -171,6 +171,7 @@ def test_project_and_since_filters(conn, tmp_path):
     # A sub-directory and a worktree both resolve to the main repo root; file paths stay checkout-relative.
     assert {r[0] for r in conn.execute("SELECT cwd FROM sessions")} == {str(repo)}
     assert conn.execute("SELECT files FROM tool_calls WHERE session_id = 'in-sub'").fetchone()[0] == '["pkg/a.py"]'
+    assert conn.execute("SELECT files FROM tool_calls WHERE session_id = 'in-wt'").fetchone()[0] == '["a.py"]'
     assert run(conn, tmp_path, project=str(repo)) == {"unchanged": 2, "outside --project": 1}
     counts = run(conn, tmp_path)  # filter lifted: the unchanged log now loads
     assert (counts["loaded"], conn.execute("SELECT cwd FROM sessions WHERE session_id = 'elsewhere'").fetchone()[0]) == (1, "/gone/dir")
