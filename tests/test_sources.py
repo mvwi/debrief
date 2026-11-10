@@ -32,16 +32,19 @@ def write(path: Path, entries: list[dict], tail: str = "") -> Path:
     return path
 
 
-def codex_entries(session_id: str, prompt: str, source: str = "vscode") -> list[dict]:
+def codex_entries(session_id: str, prompt: str, source: str = "vscode", originator: str = "codex_cli_rs",
+                  more: tuple[str, ...] = ()) -> list[dict]:
     def item(kind: str, payload: dict, second: int) -> dict:
         return {"timestamp": f"2026-01-03T09:00:{second:02}.000Z", "type": kind, "payload": payload}
     return [
-        item("session_meta", {"id": session_id, "cwd": "/work/api", "source": source}, 0),
+        item("session_meta", {"id": session_id, "cwd": "/work/api", "source": source, "originator": originator}, 0),
         item("turn_context", {"model": "gpt-test"}, 1),
         item("response_item", {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}, 2),
         item("response_item", {"type": "message", "role": "assistant",
                                "content": [{"type": "output_text", "text": "done"}]}, 3),
         item("event_msg", {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 70, "output_tokens": 9}}}, 4),
+        *(item("response_item", {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}, 10 + n)
+          for n, text in enumerate(more)),
     ]
 
 
@@ -125,6 +128,21 @@ def test_sdk_sessions_load_only_with_two_human_turns(conn, tmp_path):
     write(job, claude_entries("job", [("j1", "blame this CI failure"), ("j2", "and the fix?")], entrypoint="sdk-ts"))
     assert run(conn, tmp_path) == {"loaded": 1, "unchanged": 2}
     assert [s for s, _ in human_turns(conn)].count("job") == 2
+
+
+def test_codex_wrapper_app_sessions_load_only_with_two_human_turns(conn, tmp_path):
+    job = write(tmp_path / "codex/rollout-job.jsonl", codex_entries("job", "handle this PR", originator="some-app"))
+    write(tmp_path / "codex/rollout-chat.jsonl", codex_entries("chat", "hello", originator="some-app", more=("go on",)))
+    write(tmp_path / "codex/rollout-tui.jsonl", codex_entries("tui", "one typed prompt"))  # Codex's own CLI
+    write(tmp_path / "codex/rollout-old.jsonl", [e if e["type"] != "session_meta" else
+                                                {**e, "payload": {"id": "old", "cwd": "/work/api"}}
+                                                for e in codex_entries("old", "no launcher recorded")])
+    assert run(conn, tmp_path) == {"headless run": 1, "loaded": 3}
+    assert [s for s, _ in human_turns(conn)] == ["chat", "chat", "old", "tui"]
+
+    write(job, codex_entries("job", "handle this PR", originator="some-app", more=("now rebase it",)))
+    assert run(conn, tmp_path) == {"loaded": 1, "unchanged": 3}
+    assert run(conn, tmp_path, include_headless=True) == {"unchanged": 4}
 
 
 def test_include_headless_loads_one_turn_sdk_sessions(conn, tmp_path):
