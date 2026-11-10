@@ -82,4 +82,20 @@ def test_mark_as_the_trailing_break():
 
 def test_damaged_private_key():
     pem = "-----BEGIN\ufffd RSA PRIVATE KEY-----\nMII" + "a" * 30 + "\ufffd" + "b" * 30 + "\n-----END RSA PRIVATE KEY-----"
-    assert redact_tree(pem) == "[redacted]"
+    assert "MII" not in redact_tree(pem) and "bbbb" not in redact_tree(pem)
+
+
+def test_damaged_key_header_with_a_clean_body():
+    body = "MII" + "Ab1" * 20
+    for header in ("-----BEGIN\ufffdRSA\ufffdPRIVATE\ufffdKEY-----",   # marks where the spaces were
+                   "-----BEGIN\ufffdRSA PRI\ufffdVATE KEY-----",        # one mark a space, one extra
+                   "-----BEGIN RSA PRIVATE KEY-----\ufffd"):
+        out = redact_tree(f"before\n{header}\n{body}\n{body}\n-----END RSA PRIVATE KEY-----\nafter")
+        assert body not in out and out.startswith("before\n") and out.endswith("\nafter"), (header, out)
+    cut = redact_tree(f"-----BEGIN\ufffdPRIVATE\ufffdKEY-----\n{body}")  # no END line
+    assert body not in cut
+
+
+def test_mark_touching_the_word_before_a_bearer_token():
+    token = "x1" * 15
+    assert token not in redact_tree("x\ufffdbearer " + token)

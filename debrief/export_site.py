@@ -75,13 +75,44 @@ DAMAGED_MIN = 16
 DAMAGED_RUN = re.compile(r"\S*\ufffd\S*")
 
 
+# In damaged text a private key's header may not survive well enough to match, so any text
+# that spells PRIVATE KEY once marks and spaces are ignored is cut from its first dashes on.
+DAMAGED_KEY = re.compile(r"P\W*R\W*I\W*V\W*A\W*T\W*E\W*K\W*E\W*Y")
+DAMAGED_KEY_END = re.compile(r"E\W*N\W*D\b[^\n]{0,60}?-{3,}")
+
+
 def redact_damaged(text: str) -> str:
     """Redact a string holding U+FFFD, which marks bytes the source could not decode, then drop it.
 
     A mark can sit inside a secret, or be the only break before or after one, in any mix, so
-    no fixed way of reading the marks finds every secret. Instead any long run of text that
-    touches a mark is blanked, secret or not; damaged text is rare and not worth the risk.
+    no single way of reading the marks finds every secret. Three steps, each on what the
+    last one left:
+    1. blank what the patterns find with the marks removed, and with the marks as spaces
+       (this is what catches a secret of several words, such as a private key or a bearer
+       token, whose first word a mark touches);
+    2. blank any long run of text that still touches a mark, secret or not;
+    3. the normal pass.
     """
+    key = DAMAGED_KEY.search(text)
+    if key:
+        start = max(text.rfind("---", 0, key.start()), 0)
+        start = len(text[:start].rstrip("-")) if start else 0
+        ends = [m.end() for m in DAMAGED_KEY_END.finditer(text, key.end())]
+        text = text[:start] + "[redacted]" + (text[ends[-1]:].lstrip("-") if ends else "")
+    keep = [i for i, c in enumerate(text) if c != "\ufffd"]
+    joined = "".join(text[i] for i in keep)
+    spaced = text.replace("\ufffd", " ")
+    spans = []
+    for pattern, _ in SECRETS:
+        spans += [(keep[m.start()], keep[m.end() - 1] + 1) for m in pattern.finditer(joined) if m.end() > m.start()]
+        spans += [m.span() for m in pattern.finditer(spaced)]
+    out, at = [], 0
+    for start, end in sorted(spans):
+        if start >= at:
+            out += [text[at:start], "[redacted]"]
+        at = max(at, end)
+    text = "".join([*out, text[at:]])
+
     def blank(m: re.Match) -> str:
         rest = m.group().replace("\ufffd", "")
         return "[redacted]" if len(rest) >= DAMAGED_MIN else rest
