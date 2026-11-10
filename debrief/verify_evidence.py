@@ -30,7 +30,7 @@ from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json
 
 MODEL = "claude-sonnet-5"
 
-SYSTEM = """You check evidence for one idea from a report on how an engineering team works with AI coding
+SYSTEM = """You check evidence for one idea from a report on how a developer or a team works with AI coding
 agents. The idea names a specific problem. It cites items: human messages in agent sessions (with the agent
 text just before them), failed CI runs (with a log tail) and PR review comments.
 
@@ -79,13 +79,13 @@ def parse(text: str) -> list[dict]:
     return [reply] if isinstance(reply, dict) and isinstance(reply.get("supports"), list) else []
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", help="Recommendations run_id (default: latest)")
     parser.add_argument("--force", action="store_true", help="Check ideas that already have check rows")
     parser.add_argument("--parallel", type=int, default=3, help="Concurrent model calls (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true", help="Print the first prompt; no model call")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     load_dotenv()
 
     conn = connect()
@@ -107,8 +107,11 @@ def main() -> None:
         refs = idea_refs(conn, labels, rec, findings)
         if refs:
             jobs[rec["rec_id"]] = (rec, refs, *prompt(rec, refs))
+    if not jobs:
+        print("no idea cites any evidence; nothing to check")
+        return
     if args.dry_run:
-        rec, refs, user, _ = next(iter(jobs.values()))
+        _, _, user, _ = next(iter(jobs.values()))
         print(f"~{sum(len(j[2]) for j in jobs.values()) // 4} input tokens over {len(jobs)} calls\n")
         print(user[:6000])
         return
