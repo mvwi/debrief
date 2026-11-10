@@ -72,6 +72,17 @@ To pick the model for each stage, write `~/.local/share/debrief/config.toml`:
 Stages are `label`, `synthesize`, `recommend` and `verify`. `debrief config` prints what each
 will use. A flag beats an environment variable, which beats the file.
 
+### Settings page
+
+`debrief open` has a Settings page that does the same without editing files. It picks the
+provider and model for each stage, turns the GitHub lookups on or off, and saves an OpenRouter
+key.
+
+- Saving rewrites `config.toml`; comments you wrote in it are lost.
+- The key goes in `~/.local/share/debrief/.env`, readable only by you. The page shows its last
+  four characters and never the key. `OPENROUTER_API_KEY` set in your shell wins over the saved one.
+- The server takes these writes only from a page it served itself, on `127.0.0.1`.
+
 How they compare, measured on the prototype's data with no human-labeled set behind it:
 
 - On 66 turns where the two disagreed, a blind reader sided with Jev 32 times and Haiku 17 on

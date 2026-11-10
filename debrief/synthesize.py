@@ -41,9 +41,8 @@ from functools import partial
 from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 
-from debrief.config import choose
+from debrief.config import choose, load_env
 from debrief.db import connect
 from debrief.paths import BUNDLE_DIR
 from debrief.relay import is_relayed
@@ -843,7 +842,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--force", action="store_true", help="Call the model even when a bundle is cached")
     parser.add_argument("--db", type=Path, help="Database path (default debrief.db)")
     args = parser.parse_args(argv)
-    load_dotenv()
+    load_env()
 
     conn = connect(args.db) if args.db else connect()
     mark_relayed(conn)

@@ -37,9 +37,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
 import httpx
-from dotenv import load_dotenv
 
-from debrief.config import choose
+from debrief.config import choose, load_env
 from debrief.db import connect
 from debrief.synthesize import ClaudeCodeError, ask_claude_code
 
@@ -738,7 +737,7 @@ def main(argv: list[str] | None = None) -> None:
                         help="Concurrent claude -p calls (default %(default)s)")
     args = parser.parse_args(argv)
 
-    load_dotenv()
+    load_env()
     args.llm, model = choose("label", args.llm, args.model)
     key = os.environ.get("OPENROUTER_API_KEY", "")
     conn = connect()
@@ -769,7 +768,7 @@ def main(argv: list[str] | None = None) -> None:
         run_claude(conn, model, items, args.parallel, args.verbose)
         return
     if not key:
-        raise SystemExit("OPENROUTER_API_KEY is empty in .env; use --dry-run, --llm claude-code, or set it.")
+        raise SystemExit("OPENROUTER_API_KEY is not set. Save a key on the Settings page of `debrief open`, or use --dry-run or --llm claude-code.")
 
     print(f"classifying {len(items)} items with {model}")
     cost, failed, done = 0.0, 0, 0

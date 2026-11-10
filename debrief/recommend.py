@@ -17,9 +17,7 @@ import shutil
 import sys
 from datetime import UTC, datetime
 
-from dotenv import load_dotenv
-
-from debrief.config import choose
+from debrief.config import choose, load_env
 from debrief.db import connect
 from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json
 
@@ -192,7 +190,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--run", help="Findings run_id (default: latest)")
     parser.add_argument("--dry-run", action="store_true", help="Print the prompt; no model call")
     args = parser.parse_args(argv)
-    load_dotenv()
+    load_env()
 
     conn = connect()
     run_id = args.run or latest_run(conn)

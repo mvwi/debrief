@@ -21,9 +21,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
-from dotenv import load_dotenv
-
-from debrief.config import choose
+from debrief.config import choose, load_env
 from debrief.db import connect
 from debrief.export_site import labels_by_turn, ref_id, resolve
 from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json
@@ -84,7 +82,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--parallel", type=int, default=3, help="Concurrent model calls (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true", help="Print the first prompt; no model call")
     args = parser.parse_args(argv)
-    load_dotenv()
+    load_env()
 
     conn = connect()
     run_id = args.run or conn.execute("SELECT MAX(run_id) FROM recommendations").fetchone()[0]

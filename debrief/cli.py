@@ -14,9 +14,11 @@ import functools
 import http.server
 import importlib
 import io
+import json
 import sys
 import webbrowser
 
+from debrief import config
 from debrief.paths import HOME, SITE_OUT
 
 # Stage name -> module. Each module has main(argv).
@@ -75,18 +77,83 @@ def sync(argv: list[str]) -> None:
 
 
 class ReportHandler(http.server.SimpleHTTPRequestHandler):
-    """Static files for requests addressed to this machine only.
+    """Static files and the settings API, for requests addressed to this machine only.
 
-    A web page can point its own hostname at 127.0.0.1 (DNS rebinding) and read the report
+    A web page can point its own hostname at 127.0.0.1 (DNS rebinding) and reach this server
     through the browser; checking Host stops that, since the page cannot fake it.
+
+    The only writes are config.toml and the key in DEBRIEF_HOME/.env. A write must be JSON, which
+    a page on another site cannot send without a preflight this server never answers, and must
+    come from this origin when the browser names one.
     """
 
-    def send_head(self):
-        port = self.server.server_port
-        if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+    MAX_BODY = 4096
+
+    def local(self) -> bool:
+        ok = self.headers.get("Host") in self.hosts()
+        if not ok:
             self.send_error(403, "debrief serves only 127.0.0.1 and localhost")
-            return None
-        return super().send_head()
+        return ok
+
+    def hosts(self) -> tuple[str, str]:
+        port = self.server.server_port
+        return f"127.0.0.1:{port}", f"localhost:{port}"
+
+    def send_head(self):
+        return super().send_head() if self.local() else None
+
+    def do_GET(self):
+        if self.path != "/api/settings":
+            super().do_GET()
+        elif self.local():
+            self.reply_settings()
+
+    def do_POST(self):
+        if not self.local():
+            return
+        self.close_connection = True  # a refused body is never read, so the connection cannot be reused
+        length = self.headers.get("Content-Length", "0")
+        if self.headers.get("Origin") not in (None, *(f"http://{h}" for h in self.hosts())):
+            return self.reply(403, {"error": "wrong origin"})
+        if self.headers.get_content_type() != "application/json":
+            return self.reply(415, {"error": "send application/json"})
+        if not length.isdecimal() or int(length) > self.MAX_BODY:
+            return self.reply(413, {"error": f"body must be at most {self.MAX_BODY} bytes"})
+        try:
+            body = json.loads(self.rfile.read(int(length)) or b"{}")
+            if not isinstance(body, dict):
+                raise TypeError("expected a JSON object")
+            match self.command, self.path:
+                case "POST", "/api/settings":
+                    if not isinstance(body.get("stages"), dict) or not isinstance(body.get("github"), bool):
+                        raise TypeError("expected {stages: {...}, github: true or false}")
+                    config.save({**body["stages"], "github": {"enabled": body["github"]}})
+                case "POST", "/api/key":
+                    config.save_key(body.get("key"))
+                case "DELETE", "/api/key":
+                    config.remove_key()
+                case _:
+                    return self.reply(404, {"error": "no such endpoint"})
+        except (ValueError, TypeError) as e:  # bad JSON is a ValueError
+            return self.reply(400, {"error": str(e)})
+        self.reply_settings()
+
+    do_DELETE = do_POST
+
+    def reply_settings(self) -> None:
+        try:
+            self.reply(200, config.settings())
+        except SystemExit as e:  # config.toml was broken by hand
+            self.reply(500, {"error": str(e)})
+
+    def reply(self, status: int, obj: dict) -> None:
+        body = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def end_headers(self):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
