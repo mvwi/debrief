@@ -72,11 +72,12 @@ def redact(text: str) -> str:
 def redact_tree(obj):
     """Redact every string, keys included, in a JSON-like structure.
 
-    U+FFFD (left where the source had undecodable bytes; the artifact host rejects it) goes
-    first: stripping it afterwards could join the two halves of a secret it had split.
+    U+FFFD (left where the source had undecodable bytes; the artifact host rejects it) is
+    stripped between two passes. Before stripping, it is the word break that lets a pattern
+    match in "x\ufffdghp_..."; after, the halves of a secret it had split are joined.
     """
     if isinstance(obj, str):
-        return redact(obj.replace("\ufffd", ""))
+        return redact(redact(obj).replace("\ufffd", ""))
     if isinstance(obj, (list, tuple)):
         return [redact_tree(v) for v in obj]
     if isinstance(obj, dict):

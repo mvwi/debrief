@@ -45,3 +45,8 @@ def test_replacement_char_cannot_hide_a_secret():
     split = GH[:10] + "\ufffd" + GH[10:]
     out = json.dumps(redact_tree({split: split}), ensure_ascii=False)
     assert GH not in out and "\ufffd" not in out and out.count("[redacted]") == 2
+
+
+def test_replacement_char_as_the_only_word_break():
+    out = redact_tree("x\ufffd" + GH)
+    assert GH not in out and "[redacted]" in out
