@@ -64,6 +64,26 @@ def sync(argv: list[str]) -> None:
     print("\nDone. Run `debrief open` to read the report.")
 
 
+class ReportHandler(http.server.SimpleHTTPRequestHandler):
+    """Static files for requests addressed to this machine only.
+
+    A web page can point its own hostname at 127.0.0.1 (DNS rebinding) and read the report
+    through the browser; checking Host stops that, since the page cannot fake it.
+    """
+
+    def send_head(self):
+        port = self.server.server_port
+        if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            self.send_error(403, "debrief serves only 127.0.0.1 and localhost")
+            return None
+        return super().send_head()
+
+    def end_headers(self):
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
+
 def serve(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="debrief open", description="Serve the report on localhost.")
     p.add_argument("--port", type=int, default=8765)
@@ -71,7 +91,7 @@ def serve(argv: list[str]) -> None:
     args = p.parse_args(argv)
     if not (SITE_OUT / "data" / "index.json").exists():
         sys.exit(f"debrief: no report in {SITE_OUT}. Run `debrief sync` first.")
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(SITE_OUT))
+    handler = functools.partial(ReportHandler, directory=str(SITE_OUT))
     try:
         # Loopback only: the report holds transcripts.
         server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler)
