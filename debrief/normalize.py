@@ -16,7 +16,9 @@ Re-running replaces each session's rows.
 import argparse
 import gzip
 import json
+import posixpath
 import re
+import shlex
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +26,9 @@ from debrief import db
 from debrief.paths import RAW_DIR
 
 OUTPUT_LIMIT = 4000
+# Raise this when a change here alters the rows a log produces: debrief.sources then reads
+# every log again, changed on disk or not. (main() below reloads Entire folders on every run.)
+PARSER_VERSION = 2
 
 # Text the harness puts in a user turn. A user message starting with one of these is "injected".
 INJECTED_PREFIXES = (
@@ -42,6 +47,16 @@ FILE_TOOLS = {"read", "edit", "write", "multiedit", "notebookedit"}
 WRITE_TOOLS = {"edit", "write", "multiedit", "notebookedit", "apply_patch"}
 # Codex scripts embed the patch in a JS string, so a header can end at a literal "\\n".
 PATCH_HEADER = re.compile(r"\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*(?=\\n|\n|\"|$)")
+# Tools that run a shell command; shell_writes() finds the files such a command writes.
+SHELL_TOOLS = {"bash", "shell", "exec_command", "local_shell"}
+# A heredoc: the body is data, not commands, so it goes before the command is read.
+HEREDOC = re.compile(r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*)\n.*?\n[ \t]*\3[ \t]*(?=\n|$)", re.DOTALL)
+SHELL_BREAK = {"|", "||", "&&", ";", ";;", "&", "|&", "(", ")"}
+# Redirect targets that are not files worth counting: devices and the system's temp folders.
+NOT_A_FILE = re.compile(r"/dev/|/tmp/|/private/tmp/|/var/folders/|/private/var/folders/")
+# A shell command inside a Codex exec script, as a plain double-quoted string.
+SCRIPT_CMD = re.compile(r'\bcmd\s*:\s*("(?:[^"\\\n]|\\.)*")')
+SCRIPT_WORKDIR = re.compile(r'\bworkdir\s*:\s*("(?:[^"\\\n]|\\.)*")')
 # Paths inside a git worktree other than the session's cwd, e.g. .../.worktrees/<name>/cmd/x.go.
 WORKTREE = re.compile(r".*/(?:\.worktrees/[^/]+|\.herdr/worktrees/[^/]+/[^/]+)/")
 # Commands for which exit 1 means "nothing matched" or "false" rather than failure.
@@ -82,15 +97,29 @@ class Log:
         return self.add_message("assistant", ts, "")
 
     def add_call(self, msg_idx: int, call_id: str, name: str, args, patch: str = "") -> dict:
-        files = []
-        if name.lower() in FILE_TOOLS and isinstance(args, dict):
-            path = args.get("file_path") or args.get("path") or args.get("notebook_path")
-            if path:
-                files.append(path)
-        files += PATCH_HEADER.findall(patch)
+        files, written = [], []
+        if isinstance(args, dict):
+            if name.lower() in FILE_TOOLS:
+                path = args.get("file_path") or args.get("path") or args.get("notebook_path")
+                if path:
+                    files.append(path)
+            elif name.lower() in SHELL_TOOLS:
+                command = args.get("command") or args.get("cmd")
+                if isinstance(command, list):  # ["bash", "-lc", script], or the argv itself
+                    command = command[-1] if command[:1] in (["bash"], ["sh"], ["zsh"]) else shlex.join(map(str, command))
+                workdir = args.get("workdir") if isinstance(args.get("workdir"), str) else ""
+                written = shell_writes(command if isinstance(command, str) else "", workdir or self.cwd)
+            elif name == "apply_patch" and not patch:  # the patch as a plain argument
+                patch = next((v for v in (args.get("input"), args.get("patch")) if isinstance(v, str)), "")
+        if name == "exec":  # a Codex script: read the shell commands it passes as plain strings
+            workdirs = set(SCRIPT_WORKDIR.findall(patch))
+            workdir = unquote(workdirs.pop()) if len(workdirs) == 1 else ""
+            for literal in SCRIPT_CMD.findall(patch):
+                written += shell_writes(unquote(literal), workdir or self.cwd)
+        files += written + PATCH_HEADER.findall(patch)
         call = {
             "msg_idx": msg_idx, "name": name, "input": json.dumps(args), "output": None,
-            "is_error": 0, "files": files, "writes": int(name.lower() in WRITE_TOOLS),
+            "is_error": 0, "files": files, "writes": int(name.lower() in WRITE_TOOLS or bool(written)),
             "exits": [],  # (exit code, real failure) for each shell command the call ran
         }
         self.calls.append(call)
@@ -106,6 +135,79 @@ class Log:
     def add_exit(self, call: dict | None, code: int, command: str, output: str) -> None:
         if call is not None:
             call["exits"].append((code, code != 0 and not quiet_search(code, command, output)))
+
+
+def unquote(literal: str) -> str:
+    """The value of a double-quoted string literal, or "" when it is not plain JSON."""
+    try:
+        return json.loads(literal)
+    except json.JSONDecodeError:
+        return ""
+
+
+def literal_path(token: str) -> bool:
+    """A token that names one file outright: plain path characters only, so no variable,
+    substitution, glob or space, and not a device or temp file."""
+    return bool(re.fullmatch(r"[\w./~@+-]*[\w/]", token)) and not NOT_A_FILE.match(token)
+
+
+def shell_writes(command: str, cwd: str = "") -> list[str]:
+    """Files a shell command writes, for the forms that name the file in the command text:
+    `> path` and `>> path` (so `cat > path <<EOF` and `echo x > path` too), `tee path`,
+    `sed -i ... path`, and an apply_patch heredoc. A relative path is taken from the last
+    `cd` to a literal directory in the command, else from cwd. Anything else a command may
+    write (python or perl scripts, cp, mv, git, a path held in a variable) is left out
+    rather than guessed. Returns [] for a command that cannot be split into words."""
+    found = PATCH_HEADER.findall(command) if "apply_patch" in command else []
+    text = HEREDOC.sub(r"\1", command).replace("\\\n", " ")
+    lexer = shlex.shlex(text.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:  # an unclosed quote: not something to guess at
+        tokens = []
+    here, words = "", []  # the directory a `cd` moved to; the words of the simple command so far
+
+    def end_command() -> None:
+        nonlocal here
+        name, args = (words[0], words[1:]) if words else ("", [])
+        if name == "cd" and len(args) == 1 and literal_path(args[0]):
+            here = posixpath.join(here, args[0])
+        elif name == "tee":
+            found.extend(posixpath.join(here, a) for a in args if not a.startswith("-") and literal_path(a))
+        elif name == "sed" and any(re.match(r"-[a-zA-Z]*i|--in-place", a) for a in args):
+            # Operands are the script, then the files; with -e or -f every operand is a file.
+            operands, skip = [], False
+            for i, a in enumerate(args):
+                if skip or not a:
+                    skip = False
+                elif a in ("-e", "-f"):
+                    skip = True
+                elif not a.startswith("-") and not (a.startswith(".") and "/" not in a and re.match(r"-[a-zA-Z]*i$", args[i - 1])):
+                    operands.append(a)  # not an option, nor BSD sed's backup suffix after -i
+            has_script_option = any(a in ("-e", "-f") or a.startswith(("--expression", "--file")) for a in args)
+            found.extend(posixpath.join(here, a) for a in operands[0 if has_script_option else 1:] if literal_path(a))
+        words.clear()
+
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t in (">", ">>") and i + 1 < len(tokens):
+            if literal_path(tokens[i + 1]):
+                found.append(posixpath.join(here, tokens[i + 1]))
+            if words and words[-1].isdigit():  # the 2 of `2> path` is not an argument
+                words.pop()
+            i += 1
+        elif t in SHELL_BREAK:
+            end_command()
+        elif not set(t) <= set("<>&|;()"):  # other redirects (<, <<, >&, &>) are skipped, target and all
+            words.append(t)
+        elif i + 1 < len(tokens):
+            i += 1
+        i += 1
+    end_command()
+    # "~/x" is left as written: the log does not say where home is.
+    return list(dict.fromkeys(f if f.startswith("~") or not cwd else posixpath.normpath(posixpath.join(cwd, f)) for f in found))
 
 
 def quiet_search(code: int, command: str, output: str) -> bool:
