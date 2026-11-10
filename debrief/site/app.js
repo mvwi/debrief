@@ -150,8 +150,8 @@ const projectName = (p) => (p ? state.projects.find((x) => x[0] === p)?.[1] || p
 const PROJECT_KEY = "debrief.project";
 const inProject = (s, p = state.scope.project) => !p || (p === NO_PROJECT ? !s.project : s.project === p);
 const allSessions = () => state.data.sessions.filter((s) => inProject(s));
-// An idea is about one project, or spans several (project null: habits, small projects mixed, runs from
-// before projects). A picked project shows its own ideas and the spanning ones whose evidence touches it.
+// An idea is about one project, or spans them (project null: prompting habits, and runs from before
+// projects). A picked project shows its own ideas and the spanning ones whose evidence touches it.
 const recsFor = (p) => state.data.recommendations.filter((r) => !p || (r.project ? r.project === p : r.sessions.some((id) => inProject(state.sessionsById.get(id) || {}, p))));
 const allRecs = () => recsFor(state.scope.project);
 const fromSessions = () => (state.scope.project ? `the ${plural(allSessions().length, "session")} in ${esc(workspaceLabel())}` : `all ${fmt(allSessions().length)} sessions`);
@@ -177,11 +177,14 @@ function workspaceLabel() {
 // A card that says what is missing and how to get it, in place of empty tables.
 const notice = (title, text) => `<section class="card"><div class="card-body"><h2>${esc(title)}</h2><p>${text}</p></div></section>`;
 const NOTICES = {
-  sessions: () => notice("No sessions yet", "debrief found no agent sessions to report on. Run <code>debrief sync</code> to import them."),
+  // The report holds picked projects only; index.json's projects lists the rest.
+  sessions: () => (state.data.projects?.length
+    ? notice("No project picked", `debrief found ${plural(state.data.projects.length, "project")} and analyses only the ones you pick. Run <code>debrief sync</code> to list them, then <code>debrief sync --project DIR</code> to pick one.`)
+    : notice("No sessions yet", "debrief found no agent sessions to report on. Run <code>debrief sync</code> to import them.")),
   labels: () => notice("Sessions imported, not analysed yet", `${plural(state.data.sessions.length, "session")} to <a href="#sessions">browse</a>, but none is labelled yet, so there are no correction rates or ideas. Run <code>debrief sync</code> to label them.`),
   // A picked project can have none while the run has some.
   ideas: () => (state.scope.project && state.data.recommendations.length
-    ? notice("No ideas for this project", `No idea in this run is about ${esc(workspaceLabel())} or cites its sessions. Small projects share one analysis pass, so they often get none of their own.`)
+    ? notice("No ideas for this project", `No idea in this run is about ${esc(workspaceLabel())} or cites its sessions.`)
     : NOTICES.noIdeas()),
   noIdeas: () => notice("No ideas yet", "The messages are labelled, but no findings or ideas have been written from them. Run <code>debrief sync</code> to finish the analysis."),
 };

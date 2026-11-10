@@ -8,6 +8,10 @@ of {session_id: transcript}; each session in index.json names its shard.
 Every table but sessions and messages may be empty. meta.has tells the site which optional
 data exists (GitHub, people, checkpoints, projects, labels) so it can hide the rest.
 
+Only picked projects (`[projects] include` in config.toml) are exported: their sessions, and
+the findings, ideas and evidence that belong to them. index.json's "projects" lists every
+project, picked or not, with its size and when it was last analysed.
+
     uv run python -m debrief.export_site
     uv run python -m debrief.export_site --run 20260925T182434Z --since 2026-08-11
 """
@@ -20,11 +24,12 @@ import sqlite3
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 
-from debrief import skills
-from debrief.db import connect, session_projects
+from debrief import config, skills
+from debrief.db import connect, repo_projects, session_projects
 from debrief.paths import SITE_OUT, SITE_SRC
 from debrief.recommend import LEVERS
 from debrief.relay import is_relayed
+from debrief.synthesize import ref_project
 
 MIN_CONF = 0.7          # same default as synthesize.py
 PR_KEY = "p.repo || '#' || p.pr_number"  # how the export names a PR: owner/name#12; p is the PR row
@@ -234,10 +239,15 @@ def resolve(conn, labels, ref: dict) -> dict:
 
 # --- sections -------------------------------------------------------------------------
 
-def findings_and_recs(conn, labels, run_id: str) -> tuple[dict, list, dict]:
+def findings_and_recs(conn, labels, run_id: str, picked: set[str]) -> tuple[dict, list, dict]:
+    """The run's findings and ideas, less what belongs to a project that is not picked: findings
+    about one, evidence from one, and whatever that leaves with nothing to cite."""
+    project, repos = session_projects(conn), repo_projects(conn)
     findings, refs = {}, {}
-    for r in conn.execute("SELECT * FROM findings WHERE run_id = ? ORDER BY finding_id", (run_id,)):
-        evidence = json.loads(r["evidence"] or "[]")
+    for r in conn.execute("SELECT * FROM findings WHERE run_id = ? ORDER BY finding_id", (run_id,)).fetchall():
+        evidence = [e for e in json.loads(r["evidence"] or "[]") if ref_project(conn, project, repos, e) in picked]
+        if not evidence or r["project"] not in (None, *picked):
+            continue
         for ref in evidence:
             refs.setdefault(ref_id(ref), resolve(conn, labels, ref))
         findings[r["finding_id"]] = {"id": r["finding_id"], "kind": r["kind"], "title": r["title"],
@@ -252,6 +262,8 @@ def findings_and_recs(conn, labels, run_id: str) -> tuple[dict, list, dict]:
     recs = []
     for r in conn.execute("SELECT * FROM recommendations WHERE run_id = ? ORDER BY priority", (run_id,)):
         ids = [i for i in json.loads(r["finding_ids"] or "[]") if i in findings]
+        if not ids:
+            continue
         cited = list(dict.fromkeys(e for i in ids for e in findings[i]["evidence"]))
         checked = r["rec_id"] in supported
         evidence = [e for e in cited if e in supported[r["rec_id"]]] if checked else cited
@@ -271,8 +283,9 @@ def evidence_sessions(ref: dict) -> list[str]:
     return ref.get("sessions", [])
 
 
-def sessions_section(conn, labels, since: str) -> tuple[list, list]:
-    """Per-session stats, and every human turn with a friction signal, for sessions last active since `since`."""
+def sessions_section(conn, labels, since: str, picked: set[str]) -> tuple[list, list]:
+    """Per-session stats, and every human turn with a friction signal, for sessions of picked
+    projects last active since `since`."""
     slabels: dict[str, dict] = defaultdict(dict)
     for r in conn.execute("SELECT session_id, field, value, confidence FROM session_labels"):
         slabels[r[0]][r[1]] = r[2] if (r[3] or 0) >= 0.5 or r[1].endswith("_score") else None
@@ -302,6 +315,8 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
     for s in conn.execute("SELECT * FROM sessions WHERE COALESCE(last_activity_at, started_at, '') >= ? "
                           "ORDER BY started_at", (since,)):
         sid = s["session_id"]
+        if project.get(sid) not in picked:
+            continue
         started = first_ts.get(sid) or s["started_at"] or s["last_activity_at"]
         kinds: Counter = Counter()
         friction = []
@@ -322,7 +337,7 @@ def sessions_section(conn, labels, since: str) -> tuple[list, list]:
             "id": sid, "name": s["display_name"], "agent": s["agent"], "model": s["model"],
             "author": s["author"] or None, "started": started, "last": s["last_activity_at"] or started,
             # The session's project, a folder; the site shows its last part and scopes on the whole path.
-            "project": project.get(sid) or None,
+            "project": project[sid],
             "human_turns": len(turns_by_session.get(sid, [])), "turn_kinds": dict(kinds),
             "corrections": count["correction"], "reversals": count["reversal"], "defects": count["defect"],
             "could_find": count["could_find"], "not_filed": len(not_filed), "friction": friction,
@@ -544,6 +559,22 @@ def volume(conn, ids: set[str]) -> dict:
     }
 
 
+def projects_section(conn, picked: set[str]) -> list[dict]:
+    """Every project, picked or not, biggest first: its size, and when synthesize last finished it."""
+    project = session_projects(conn)
+    turns = dict(conn.execute("SELECT session_id, COUNT(*) FROM messages WHERE role = 'user' AND user_kind = 'human' "
+                              "GROUP BY session_id"))
+    analysed = dict(conn.execute("SELECT project, analysed_at FROM project_runs"))
+    out: dict[str, dict] = {}
+    for sid, p in project.items():
+        if p:
+            row = out.setdefault(p, {"path": p, "sessions": 0, "turns": 0, "picked": p in picked,
+                                     "analysed": analysed.get(p)})
+            row["sessions"] += 1
+            row["turns"] += turns.get(sid, 0)
+    return sorted(out.values(), key=lambda r: (-r["sessions"], r["path"]))
+
+
 def repo_of(prs: dict) -> str | None:
     """owner/name when every PR is in one repo; None with several, or without GitHub data."""
     repos = {key.rsplit("#", 1)[0] for key in prs}
@@ -561,11 +592,16 @@ def main(argv: list[str] | None = None) -> None:
     run_id = args.run or conn.execute("SELECT MAX(run_id) FROM recommendations").fetchone()[0] \
         or conn.execute("SELECT MAX(run_id) FROM findings").fetchone()[0]
     labels = labels_by_turn(conn)
-    findings, recs, refs = findings_and_recs(conn, labels, run_id)
-    sessions, flagged = sessions_section(conn, labels, args.since)
+    picked = set(config.projects())
+    findings, recs, refs = findings_and_recs(conn, labels, run_id, picked)
+    sessions, flagged = sessions_section(conn, labels, args.since, picked)
     authors = {s["id"]: s["author"] for s in sessions}
-    projects = {s["id"]: s["project"] for s in sessions}
-    prs = prs_section(conn)
+    # GitHub rows reach the report through the sessions' PRs, so keep only those.
+    linked = {p["n"] for s in sessions for p in s["prs"]}
+    prs = {k: v for k, v in prs_section(conn).items() if k in linked}
+    ci = ci_section(conn, args.since)
+    ci = {"runs_by_pr": {k: v for k, v in ci["runs_by_pr"].items() if k in linked},
+          "failures": [f for f in ci["failures"] if f["pr"] in linked]}
     for rec in recs:
         touched = {sid for e in rec["evidence"] for sid in evidence_sessions(refs[e])}
         rec["sessions"] = sorted(touched)
@@ -581,11 +617,12 @@ def main(argv: list[str] | None = None) -> None:
                  "has": {"github": bool(prs),
                          "people": len(set(authors.values()) - {None}) > 1,  # one person: nothing to compare
                          "checkpoints": any(s["checkpoints"] for s in sessions),
-                         "projects": any(projects.values()),
+                         "projects": bool(sessions),
                          "labels": vol["labels"] > 0}},
         "levers": LEVERS, "recommendations": recs, "findings": findings, "refs": refs,
         "sessions": sessions, "flagged": flagged, "files": hotspot_files(conn, labels, set(authors))[:60],
-        "ci": ci_section(conn, args.since), "reviews": review_section(conn), "prs": prs,
+        "projects": projects_section(conn, picked),
+        "ci": ci, "reviews": [r for r in review_section(conn) if r["pr"] in linked], "prs": prs,
         "skills": skills_section(conn, set(authors)),
     }
     SITE_OUT.mkdir(parents=True, exist_ok=True)

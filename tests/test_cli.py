@@ -77,6 +77,37 @@ def test_settings_save_and_read_back(api):
     assert not config.github_enabled()
 
 
+def test_settings_keep_or_set_picked_projects(api):
+    config.pick("/home/me/alpha")
+    status, got, _ = api("POST", "/api/settings", GOOD)  # the Settings page sends no projects
+    assert status == 200 and got["projects"] == ["/home/me/alpha"] == config.projects()
+    status, got, _ = api("POST", "/api/settings", GOOD | {"projects": ["/home/me/beta"]})
+    assert status == 200 and got["projects"] == ["/home/me/beta"] == config.projects()
+    assert api("POST", "/api/settings", GOOD | {"projects": ["not/absolute"]})[0] == 400
+    assert config.projects() == ["/home/me/beta"]
+
+
+def test_sync_stops_before_any_model_call_until_a_project_is_picked(api, tmp_path, monkeypatch, capsys):
+    from debrief import cli, db
+    conn = db.connect(tmp_path / "debrief.db")
+    conn.execute("INSERT INTO sessions (session_id, cwd) VALUES ('s1', '/home/me/alpha')")
+    conn.execute("INSERT INTO messages (session_id, idx, role, user_kind, text) VALUES ('s1', 0, 'user', 'human', 'hi')")
+    conn.commit()
+    monkeypatch.setattr(db, "connect", lambda: conn)
+    ran = []
+    monkeypatch.setattr(cli, "stage", lambda name, argv: ran.append(name))
+    cli.sync(["--no-github"])
+    out = capsys.readouterr().out
+    assert ran == ["ingest"] and "No project is picked" in out and "1        1  /home/me/alpha" in out
+    cli.sync(["--no-github", "--project", "/home/me/nowhere"])
+    assert ran == ["ingest"] * 2 and "no sessions ran in /home/me/nowhere" in capsys.readouterr().out
+    assert config.projects() == []
+    cli.sync(["--no-github", "--project", "/home/me/alpha"])
+    assert ran[2:] == ["ingest", "label", "synthesize", "recommend", "export"] and config.projects() == ["/home/me/alpha"]
+    cli.sync(["--no-github"])  # the pick is kept
+    assert ran[7:] == ["ingest", "label", "synthesize", "recommend", "export"]
+
+
 def test_key_goes_in_and_never_comes_out(api):
     status, got, text = api("POST", "/api/key", {"key": FAKE_KEY})
     assert status == 200 and got["key"] == {"set": True, "last4": "a1b2", "source": "file"}

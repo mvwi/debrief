@@ -211,7 +211,14 @@ CREATE TABLE IF NOT EXISTS findings (
     suggested_fix TEXT,
     evidence      TEXT,              -- JSON array of {session_id, msg_idx} or {event_type, event_id}
     created_at    TEXT
-    -- project (added below): the folder the finding is about; NULL when it spans projects
+    -- project (added below): the folder the finding is about; NULL when it is about all picked projects
+);
+
+-- When synthesize last finished each project's pass (it may have found nothing).
+CREATE TABLE IF NOT EXISTS project_runs (
+    project     TEXT PRIMARY KEY,    -- as in findings.project
+    run_id      TEXT,
+    analysed_at TEXT
 );
 
 -- Findings from one run merged by the lever that fixes them (recommend.py).
@@ -256,7 +263,7 @@ ADDED_COLUMNS = [
     ("gh_review_comments", "review_state", "TEXT"),  # APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED; review rows only
     ("gh_review_comments", "is_resolved", "INTEGER"),  # thread resolved; inline rows only
     ("gh_review_comments", "is_outdated", "INTEGER"),  # thread's code has since changed; inline rows only
-    # The project (see session_projects) a finding or idea is about; NULL when it spans projects, and in old runs.
+    # The project (see session_projects) a finding or idea is about; NULL when it is about all of them, and in old runs.
     ("findings", "project", "TEXT"),
     ("recommendations", "project", "TEXT"),
 ]

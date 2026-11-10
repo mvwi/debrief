@@ -40,7 +40,7 @@ const METHOD = {
         "The angles:",
         "- Code areas that draw corrections\n- Knowledge the agent was missing\n- Bugs found and left unfiled in the session\n- Correction patterns\n- Prompt habits\n- [github] CI failures\n- [github] Review comments",
         "The rules:",
-        "- Findings are built per project, the folder a session ran in. A project with 100 or more human messages gets its own; smaller projects share one pass. Prompting habits are read across all sessions.\n- Each angle gets counts plus real examples, at most five from any one session.\n- Every finding must cite its examples by ID. Citations are checked, and a finding left with none is dropped.",
+        "- Only the projects you picked are analysed. Findings are built per project, the folder a session ran in. Prompting habits are read across the picked projects together.\n- Each angle gets counts plus real examples, at most five from any one session.\n- Every finding must cite its examples by ID. Citations are checked, and a finding left with none is dropped.",
       ],
     },
     {

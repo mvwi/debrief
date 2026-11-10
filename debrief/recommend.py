@@ -1,9 +1,8 @@
 """Merge one findings run into recommendations, grouped by the lever that fixes them.
 
 Findings come per project and pipeline kind (hotspot, ci, ...), so one problem can show up
-under several kinds. Each project with its own synthesis pass gets one Claude call over its
-findings; the rest (small projects and findings that span projects) share one. An idea from
-the shared call belongs to a project when all its findings do. A call returns recommendations:
+under several kinds. Each project gets one Claude call over its findings, and the findings
+about the person's habits across projects get one more. A call returns recommendations:
 each names the lever (where the fix lives), the change to make, its effort, and the
 findings it covers. Every finding lands in exactly one recommendation, except that a finding
 listing several bugs may back one backlog recommendation per bug; any the model leaves out become their own.
@@ -20,9 +19,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
-from debrief.config import choose, load_env
+from debrief.config import choose, load_env, projects
 from debrief.db import connect, session_projects
-from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json, passes, short_name
+from debrief.synthesize import ClaudeCodeError, ask_claude_code, parse_json, short_name
 
 LEVERS = {
     "agent_config": "Agent instructions: CLAUDE.md, AGENTS.md, skills, slash commands",
@@ -48,9 +47,8 @@ comments, and cites evidence.
 Several findings often describe one problem from different angles (a hotspot file, a correction
 pattern and a knowledge gap can all be the same missing doc). Merge those.
 
-Projects: "project" on the input says every finding is about that one repo. Otherwise each finding
-carries its own "project", or null when it is about several repos or about the person's habits. Never merge
-findings from different projects into one idea, unless the idea is about habits and names no repo.
+Projects: "project" on the input says every finding is about that one repo. Without it, the findings
+are about the person's habits across their repos.
 
 Levers (where the fix lives):
 {chr(10).join(f"- {k}: {v}" for k, v in LEVERS.items())}
@@ -85,8 +83,8 @@ Rules:
 - "impact" is one neutral line saying what the problem is and where it shows up, with no numbers at all
   (e.g. "People paste review bot findings into the session by hand, across several sessions").
   Don't promise an outcome ("removes", "saves").
-- "target" starts with the project's name and a colon when the idea is about one project
-  ("canopy: CLAUDE.md", "canopy: .github/workflows/ci.yml"); no prefix when it is not.
+- "target" starts with the project's name and a colon when the input names a project
+  ("canopy: CLAUDE.md", "canopy: .github/workflows/ci.yml"); no prefix when it does not.
 - effort: S (under an hour), M (a day or less), L (more).
 - Plain, short sentences. No hype. Do not invent facts that are not in the findings.
 
@@ -128,9 +126,9 @@ def load_findings(conn, run_id: str) -> list[dict]:
     return out
 
 
-def team_context(conn, project: str | None = None) -> dict:
-    """Sessions, people and human turns: in one project, or in all of them."""
-    ids = [s for s, p in session_projects(conn).items() if project in (None, p)]
+def team_context(conn, picked: set[str]) -> dict:
+    """Sessions, people and human turns in these projects."""
+    ids = [s for s, p in session_projects(conn).items() if p in picked]
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS team (session_id TEXT PRIMARY KEY)")
     conn.execute("DELETE FROM team")
     conn.executemany("INSERT INTO team VALUES (?)", [(s,) for s in ids])
@@ -140,24 +138,21 @@ def team_context(conn, project: str | None = None) -> dict:
     return {"sessions": len(ids), "people": people, "human_turns": human}
 
 
-def groups(conn, findings: list[dict]) -> dict[str | None, list[dict]]:
-    """Findings per model call: one per project that had its own synthesis pass, then the rest under None."""
-    alone = [p["project"] for p in passes(conn) if p["project"]]
+def groups(findings: list[dict]) -> dict[str | None, list[dict]]:
+    """Findings per model call: one per project, and one (None) for those about all projects."""
     out: dict[str | None, list[dict]] = {}
     for f in findings:
-        out.setdefault(f["project"] if f["project"] in alone else None, []).append(f)
-    return dict(sorted(out.items(), key=lambda kv: alone.index(kv[0]) if kv[0] else len(alone)))
+        out.setdefault(f["project"], []).append(f)
+    return out
 
 
 def prompt(conn, project: str | None, findings: list[dict]) -> str:
-    """The user message for one call. Projects go by folder name; the full path stays here."""
+    """The user message for one call. A project goes by folder name; the full path stays here."""
+    body = {"team": team_context(conn, {project} if project else set(projects()))}
     if project:
-        body = {"team": team_context(conn, project), "project": short_name(project),
-                "findings": [{k: v for k, v in f.items() if k != "project"} for f in findings]}
-    else:
-        body = {"team": team_context(conn),
-                "findings": [{**f, "project": f["project"] and short_name(f["project"])} for f in findings]}
-    return json.dumps(body, ensure_ascii=False)
+        body["project"] = short_name(project)
+    return json.dumps({**body, "findings": [{k: v for k, v in f.items() if k != "project"} for f in findings]},
+                      ensure_ascii=False)
 
 
 # A backlog idea that reads like a list of bugs rather than one.
@@ -205,9 +200,7 @@ def check(recs: list[dict], findings: list[dict]) -> list[dict]:
                          "problem": f["detail"], "change": f["suggested_fix"], "target": "", "effort": "M",
                          "impact": "", "finding_ids": [f["id"]]})
     for r in kept:
-        # An idea is about a project when all its findings are.
-        projects = {by_id[i]["project"] for i in r["finding_ids"]}
-        r["project"] = projects.pop() if len(projects) == 1 else None
+        r["project"] = by_id[r["finding_ids"][0]]["project"]  # one call holds one project's findings
     return kept
 
 
@@ -236,10 +229,10 @@ def main(argv: list[str] | None = None) -> None:
     run_id = args.run or latest_run(conn)
     if not run_id:
         sys.exit("no findings yet; run synthesize.py")
-    prompts = {p: (fs, prompt(conn, p, fs)) for p, fs in groups(conn, load_findings(conn, run_id)).items()}
+    prompts = {p: (fs, prompt(conn, p, fs)) for p, fs in groups(load_findings(conn, run_id)).items()}
     print(f"run {run_id}: {len(prompts)} model calls")
     for p, (fs, user) in prompts.items():
-        print(f"  {short_name(p) if p else 'other projects and across projects'}: {len(fs)} findings, "
+        print(f"  {short_name(p) if p else 'across projects'}: {len(fs)} findings, "
               f"~{(len(SYSTEM) + len(user)) // 4} input tokens")
     if args.dry_run:
         print(next(iter(prompts.values()), ("", ""))[1][:4000])
@@ -258,7 +251,7 @@ def main(argv: list[str] | None = None) -> None:
             raw, usage = fut.result()
         except ClaudeCodeError as e:
             # Keep the run whole: a group the model failed on still gets one idea per finding.
-            print(f"{short_name(p) if p else 'other projects'}: failed: {e}")
+            print(f"{short_name(p) if p else 'across projects'}: failed: {e}")
             raw, usage, failed = [], {"in": 0, "out": 0, "cost": 0}, failed + 1
             if failed == len(futures):
                 sys.exit("failed: no call succeeded; recommendations left as they were")

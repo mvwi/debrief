@@ -42,12 +42,17 @@ def add_check(conn, check_id: int, name: str, conclusion: str, log: str | None =
                  "VALUES (?, 'c1', ?, ?, ?, '2026-01-05T11:00:00Z', ?)", (check_id, name, conclusion, app, log))
 
 
+PICKED = ["/w/local", "/w/big"]  # /w/small and sessions with no folder are not picked
+
+
 @pytest.fixture
 def conn(tmp_path, monkeypatch):
     monkeypatch.setattr(synthesize, "BUNDLE_DIR", tmp_path / "bundles")
     monkeypatch.setattr(synthesize, "INDEX_PATH", tmp_path / "bundles" / "index.json")
+    monkeypatch.setattr(synthesize, "projects", lambda: PICKED)
+    monkeypatch.setattr(recommend, "projects", lambda: PICKED)
     conn = connect(tmp_path / "debrief.db")
-    add_session(conn, "local")
+    add_session(conn, "local", cwd="/w/local")
     conn.commit()
     return conn
 
@@ -129,24 +134,40 @@ def two_projects(conn, only: str | None = None) -> None:
     conn.commit()
 
 
-def test_passes_split_big_projects_and_pool_the_rest(conn, monkeypatch):
-    two_projects(conn)  # each session has 2 human turns; the fixture's "local" has no folder
-    monkeypatch.setattr(synthesize, "MIN_PROJECT_TURNS", 4)
-    big, pooled, cross = synthesize.passes(conn)
+def test_one_pass_per_picked_project_then_one_across_them(conn):
+    two_projects(conn)  # /w/big has 4 human turns, the fixture's /w/local 2
+    add_session(conn, "nowhere")  # no folder: cannot be picked
+    big, local, cross = synthesize.passes(conn, [*PICKED, "/w/no-sessions"])
     assert (big["project"], big["sessions"], big["repos"]) == ("/w/big", {"b1", "b2"}, {"acme/big"})
-    assert (pooled["name"], pooled["project"], pooled["pooled"]) == (synthesize.POOLED, None, ["/w/small"])
-    assert pooled["sessions"] == {"s1", "local"} and pooled["repos"] == {"acme/small"}
-    assert (cross["sessions"], cross["kinds"]) == (None, ["prompt_practice"])
-    assert "prompt_practice" not in big["kinds"] + pooled["kinds"]
-    monkeypatch.setattr(synthesize, "MIN_PROJECT_TURNS", 5)  # nothing stands alone: one pooled pass
-    assert [p["name"] for p in synthesize.passes(conn)] == [synthesize.POOLED, synthesize.CROSS]
+    assert (local["project"], local["sessions"], local["repos"]) == ("/w/local", {"local"}, set())
+    assert "prompt_practice" not in big["kinds"] + local["kinds"]
+    # The pass about the person reads picked projects only: not /w/small, not the session with no folder.
+    assert (cross["project"], cross["kinds"]) == (None, ["prompt_practice"])
+    assert (cross["sessions"], cross["repos"]) == ({"b1", "b2", "local"}, {"acme/big"})
+    assert synthesize.passes(conn, []) == [] and synthesize.passes(conn, ["/w/no-sessions"]) == []
+
+
+def test_nothing_picked_makes_no_run(conn, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(synthesize, "projects", list)
+    synthesize.main(["--dry-run", "--db", str(tmp_path / "debrief.db")])
+    assert "no picked project has sessions" in capsys.readouterr().out
+    assert not (tmp_path / "bundles").exists()
+
+
+def test_dry_run_builds_bundles_per_picked_project(conn, tmp_path, capsys):
+    two_projects(conn)
+    synthesize.main(["--dry-run", "--db", str(tmp_path / "debrief.db")])
+    out = capsys.readouterr().out
+    assert "== big: 2 sessions, 4 human turns" in out and "== local: 1 sessions" in out and "small" not in out
+    written = sorted(str(p.relative_to(p.parents[1])) for p in (tmp_path / "bundles").glob("*/*/*.json"))
+    assert "00-big/review.json" in written and "01-local/hotspot.json" in written
+    assert "02-all-projects/prompt_practice.json" in written and "01-local/review.json" not in written
+    bundle = json.loads(next((tmp_path / "bundles").glob("*/02-all-projects/prompt_practice.json")).read_text())
+    assert {x["session_id"] for x in bundle["bundle"]["per_session"]} == {"b1", "b2", "local"}
 
 
 def test_scoped_rollup_equals_rollup_on_that_project_alone(conn, tmp_path):
     """The TEMP views must give what a database holding only that project's rows gives."""
-    conn.execute("DELETE FROM sessions")
-    for table in ("messages", "tool_calls", "turn_labels", "session_labels"):
-        conn.execute(f"DELETE FROM {table}")
     two_projects(conn)
     alone = connect(tmp_path / "alone.db")
     two_projects(alone, only="/w/big")
@@ -169,16 +190,16 @@ def test_session_with_a_pr_joins_that_repos_project(conn):
     conn.execute("INSERT INTO session_prs VALUES ('s1', 'acme/big', 1, 'branch')")  # its own folder is a repo's project
     projects = session_projects(conn)
     assert projects["wt"] == "/w/big" and projects["wt2"] == "/w/worktrees/kudu"
-    assert projects["s1"] == "/w/small" and projects["local"] is None
+    assert projects["s1"] == "/w/small" and projects["local"] == "/w/local"
 
 
-def test_pooled_finding_takes_its_project_from_its_evidence(conn):
+def test_ref_project(conn):
     two_projects(conn)
     projects, repos = session_projects(conn), {"acme/big": "/w/big", "acme/small": "/w/small"}
-    one = [{"session_id": "s1", "msg_idx": 2}, {"event_type": "review_comment", "event_id": 2}]
-    assert synthesize.evidence_project(conn, projects, repos, one) == "/w/small"
-    assert synthesize.evidence_project(conn, projects, repos, [*one, {"event_type": "check_failure", "event_id": 1}]) is None
-    assert synthesize.evidence_project(conn, projects, repos, [{"session_id": "local", "msg_idx": 2}]) is None
+    assert synthesize.ref_project(conn, projects, repos, {"session_id": "s1", "msg_idx": 2}) == "/w/small"
+    assert synthesize.ref_project(conn, projects, repos, {"event_type": "review_comment", "event_id": 2}) == "/w/small"
+    assert synthesize.ref_project(conn, projects, repos, {"event_type": "check_failure", "event_id": 1}) == "/w/big"
+    assert synthesize.ref_project(conn, projects, repos, {"event_type": "check_failure", "event_id": 99}) is None
 
 
 def test_findings_keep_their_project_and_cache_per_pass(conn):
@@ -193,25 +214,24 @@ def test_findings_keep_their_project_and_cache_per_pass(conn):
     assert synthesize.cached_run(conn, index, "old", "hotspot", synthesize.CROSS)["ids"] == ids
 
 
-def test_recommend_calls_once_per_big_project_and_tags_ideas(conn, monkeypatch):
+def test_recommend_calls_once_per_project_and_once_across(conn):
     two_projects(conn)
-    monkeypatch.setattr(synthesize, "MIN_PROJECT_TURNS", 4)
     synthesize.save_findings(conn, "r1", "hotspot", [
-        {"title": "big", "evidence": [], "project": "/w/big"}, {"title": "small", "evidence": [], "project": "/w/small"},
+        {"title": "big", "evidence": [], "project": "/w/big"}, {"title": "local", "evidence": [], "project": "/w/local"},
         {"title": "habit", "evidence": []}], "now")
-    findings = recommend.load_findings(conn, "r1")
-    groups = recommend.groups(conn, findings)
-    assert {p: [f["title"] for f in fs] for p, fs in groups.items()} == {"/w/big": ["big"], None: ["small", "habit"]}
+    groups = recommend.groups(recommend.load_findings(conn, "r1"))
+    assert {p: [f["title"] for f in fs] for p, fs in groups.items()} == {
+        "/w/big": ["big"], "/w/local": ["local"], None: ["habit"]}
     own = json.loads(recommend.prompt(conn, "/w/big", groups["/w/big"]))
     assert own["project"] == "big" and own["team"]["sessions"] == 2 and "/w/" not in json.dumps(own)
-    rest = json.loads(recommend.prompt(conn, None, groups[None]))
-    assert [f["project"] for f in rest["findings"]] == ["small", None] and rest["team"]["sessions"] == 4
-    small, habit = (f["id"] for f in groups[None])
-    recs = recommend.check([{"lever": "backlog", "title": "x", "finding_ids": [small]},
-                            {"lever": "team_practice", "title": "y", "finding_ids": [habit]}], groups[None])
-    assert [r["project"] for r in recs] == ["/w/small", None]
+    across = json.loads(recommend.prompt(conn, None, groups[None]))
+    assert "project" not in across and across["team"]["sessions"] == 3  # picked projects only, not /w/small
+    recs = [r for p, fs in groups.items()
+            for r in recommend.check([{"lever": "backlog", "title": "x", "finding_ids": [fs[0]["id"]]}], fs)]
+    assert [r["project"] for r in recs] == ["/w/big", "/w/local", None]
     recommend.save(conn, "r1", recs)
-    assert [tuple(r) for r in conn.execute("SELECT priority, project FROM recommendations")] == [(1, "/w/small"), (2, None)]
+    assert [tuple(r) for r in conn.execute("SELECT priority, project FROM recommendations")] == [
+        (1, "/w/big"), (2, "/w/local"), (3, None)]
 
 
 def test_old_database_gains_project_columns_and_keeps_its_rows(tmp_path):
