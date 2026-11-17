@@ -14,8 +14,10 @@ import json
 import re
 import sys
 import uuid
+from collections import Counter
 from importlib.metadata import version
 from pathlib import Path
+from typing import Any
 
 from debrief import config
 from debrief.db import connect, repo_projects
@@ -25,7 +27,6 @@ from debrief.export_site import (
     labels_by_turn,
     projects_section,
     prs_section,
-    redact_tree,
     review_section,
     session_file,
     sessions_section,
@@ -40,13 +41,15 @@ NO_SERVER = (f"{NAME}: there is no server to push to yet. "
              f"`{NAME} push --dry-run` builds what would be sent and sends nothing.")
 
 
-def scrub(obj) -> tuple[object, int]:
-    """The redacted copy of obj and how many redactions were made. The one door to redaction."""
+def scrub(obj, *, home_paths: bool = False) -> tuple[Any, dict[str, int]]:
+    """(scrubbed copy, {"secrets": n, "home_paths": n}). The one door to redaction."""
+    # shortcut: stands in for debrief.redact.scrub, which has this signature; replace this function
+    # with `from debrief.redact import scrub` when that module lands. Until then home paths are not
+    # rewritten, and secrets are counted by the marker, so text that already said "[redacted]" hides a hit.
+    from debrief.export_site import redact_tree
     out = redact_tree(obj)
-    # shortcut: counts the marker, so text that already said "[redacted]" hides a hit beside it;
-    # swap for the redaction module's own counting function when it lands.
     marks = [json.dumps(x, ensure_ascii=False).count("[redacted]") for x in (out, obj)]
-    return out, max(marks[0] - marks[1], 0)
+    return out, {"secrets": max(marks[0] - marks[1], 0), "home_paths": 0}
 
 
 def machine_id() -> tuple[str, bool]:
@@ -107,16 +110,17 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
                    "failures": [f for f in ci["failures"] if f["pr"] in linked]},
             "reviews": [r for r in review_section(conn) if r["pr"] in linked]}
 
-    redactions, objects, send = 0, {}, {}
+    counts, objects, send = Counter(), {}, {}
     for path, obj in raw.items():
-        clean, n = scrub(obj)
-        redactions += n
+        clean, n = scrub(obj, home_paths=True)
+        counts.update(n)
         body = json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         objects[path] = {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
         if have.get(path) != objects[path]["sha256"]:
             send[path] = body
     projects, n = scrub([{"key": key[r["path"]], "name": r["name"], "sessions": r["sessions"], "turns": r["turns"],
-                          "analysed_at": r["analysed_at"]} for r in rows if r["picked"]])
+                          "analysed_at": r["analysed_at"]} for r in rows if r["picked"]], home_paths=True)
+    counts.update(n)
     manifest = {"format": FORMAT, "tool": f"{NAME} {version('debrief-cli')}", "machine": machine,
                 "projects": projects, "unpicked": sum(not r["picked"] for r in rows),
                 "objects": objects, "sent": sorted(send)}
@@ -124,7 +128,7 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
         "sessions": len(sessions), "sessions_sent": sum(p.startswith("sessions/") for p in send),
         "turns": sum(s["human_turns"] for s in sessions),
         "messages": sum(len(raw[object_path(s["id"])]["messages"]) for s in sessions),
-        "redactions": redactions + n,
+        "secrets": counts["secrets"], "home_paths": counts["home_paths"],
         "repos": sorted({k for k in key.values() if not k.startswith("local:")} | {k.rsplit("#", 1)[0] for k in prs}),
         "removed": sorted(set(have) - set(objects)),
     }
@@ -175,7 +179,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  sessions    {stats['sessions']}, of which {stats['sessions_sent']} sent"
           f"{' (the rest have not changed)' if have is not None else ''}")
     print(f"  turns       {stats['turns']} of yours, {stats['messages']} messages in all")
-    print(f"  redactions  {stats['redactions']} secret-shaped strings replaced with [redacted]")
+    print(f"  redactions  {stats['secrets']} secrets replaced with [redacted], "
+          f"{stats['home_paths']} home-folder paths shortened to ~")
     print(f"  repo names  {', '.join(stats['repos']) or 'none'}")
     if stats["removed"]:
         gone = sum(path.startswith("sessions/") for path in stats["removed"])

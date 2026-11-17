@@ -132,7 +132,7 @@ def test_bundle_holds_picked_projects_only_and_no_planted_token(tmp_path):
                  "sessions    3, of which 3 sent", "turns       4 of yours, 5 messages", "repo names  octo/alpha",
                  "Made an id for this machine"):
         assert line in got.stdout, line
-    assert int(got.stdout.split("redactions  ")[1].split()[0]) >= 7
+    assert int(got.stdout.split("redactions  ")[1].split()[0]) >= 7 and "home-folder paths shortened to ~" in got.stdout
     assert str(len(data)) in got.stdout.replace(",", "")
 
 

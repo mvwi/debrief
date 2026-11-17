@@ -171,8 +171,9 @@ written. It replaces secret-shaped strings (GitHub, Anthropic, OpenAI, AWS, Slac
 Google tokens, JWTs, private keys, bearer tokens, passwords in URLs) with `[redacted]`. It
 works on patterns, so it misses a secret with no known shape.
 
-Transcript text holds file paths as the agent saw them, home directory included. Rewriting
-those is the redaction module's job and is not done by format 1's builder itself.
+The same function shortens home-folder paths in text (`/Users/<name>`, `/home/<name>`,
+`C:\Users\<name>`) to `~`, so a transcript does not carry the user's login name that way.
+The dry run reports both counts.
 
 ## Left out, and why
 
