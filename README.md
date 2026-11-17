@@ -83,9 +83,17 @@ Unticking it on the Projects page does the same.
   logged-in `gh` CLI and read-only. It sends repo names, PR numbers, branch names and commit
   SHAs, and nothing from your transcripts. `--no-github`, or `[github] enabled = false` in
   config.toml, turns it off; without `gh` it is skipped.
-- The report holds your transcripts. `debrief open` serves it on 127.0.0.1 only. Token-shaped
-  strings (GitHub, Anthropic, OpenAI, AWS, Slack, Stripe, private keys and others) are replaced
-  with `[redacted]` in the report, but the redaction is pattern-based: read before you share.
+- The report holds your transcripts. `debrief open` serves it on 127.0.0.1 only.
+- Secrets are replaced with `[redacted]` in the report and in anything debrief uploads. The text
+  sent to the model for labeling and synthesis is not redacted. Three things are caught: known
+  token shapes (GitHub, Anthropic, OpenAI, AWS key ids, Slack, Stripe, Google, Resend and other
+  vendor prefixes, JWTs, private keys, bearer tokens, cookies, passwords in URLs); values of 12 or
+  more characters given to a name that sounds secret (`API_KEY=`, `"client_secret":`,
+  `--token`); and the exact values of your saved OpenRouter key and of environment variables
+  whose names contain KEY, TOKEN, SECRET, PASSWORD or CREDENTIAL. It is pattern matching, not a
+  guarantee. It misses a secret with no known shape and no telling name beside it: a password
+  in a sentence, a token in a URL parameter called `t`, a short password. It does not remove
+  email addresses, IP addresses, host names or people's names. Read before you share.
 
 ## Which labeler
 
