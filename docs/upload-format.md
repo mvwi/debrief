@@ -21,12 +21,18 @@ Every file but the manifest is an *object*. An object is sent only when it chang
 Only projects the user picked (`[projects] include` in config.toml) contribute objects. The
 others are a count in the manifest: no name, no path, no sessions.
 
+Only the pusher's own sessions are sent. A session that names an author was fetched from
+Entire and may be a teammate's, and a server files every row under the signed-in user, so it
+is left out with the findings and ideas that cite it. Sessions read from local logs name no
+author and are taken as the pusher's.
+
 ### manifest.json
 
     {
      "format": 1,
      "tool": "debrief 0.1.1",
      "machine": "0b9c4c0e-3f0a-4d0e-9d55-6a1f4b6f1f0a",
+     "redaction": 3,
      "projects": [
       {"key": "octo/alpha", "name": "alpha", "sessions": 12, "turns": 140, "analysed_at": "2026-01-05T11:00:00Z"},
       {"key": "local:5f2a90c1d3e4", "name": "beta", "sessions": 3, "turns": 20, "analysed_at": null}
@@ -44,7 +50,11 @@ others are a count in the manifest: no name, no path, no sessions.
 - `tool`: the debrief version that built the push. `findings.json` names levers
   (`agent_config`, `test_harness`, ...) whose labels belong to that version and are not sent.
 - `machine`: see "Who and where".
-- `projects`: the picked projects that have sessions. `turns` counts the person's own turns.
+- `redaction`: the version of the redaction rules every object in `objects` was scrubbed under,
+  an integer that grows when the rules change. A server can keep it beside each object it
+  stores. It is 0 until the redaction module carries a version.
+- `projects`: the picked projects that have sessions. `sessions` and `turns` count what is sent;
+  `turns` are the person's own turns.
 - `unpicked`: how many other projects debrief found on the machine.
 - `objects`: every object that should exist for this machine once the push is done, sent or
   not, with the SHA-256 and length of its bytes.
@@ -61,7 +71,7 @@ With no project picked, `projects` is `[]`, `objects` is `{}` and nothing else i
 The object is the session's row from the local report plus its transcript:
 
 - `id`, `name`, `agent`, `model`, `started`, `last`, `prompt` (first 400 characters),
-  `author` (null for local logs: see "Who and where").
+  `author` (always null: see "Who and where").
 - `project`: a project `key` from the manifest.
 - Counts: `human_turns`, `turn_kinds`, `corrections`, `reversals`, `defects`, `could_find`,
   `not_filed`, `relayed`, `tool_calls`, `tool_errors`, `checkpoints`, `ci_failures`.
@@ -99,17 +109,18 @@ The latest analysis run, cut down to the picked projects. Absent when there are 
   agent text before it. `e:check_failure:<id>` is a CI failure with the tail of its log.
   `e:review_comment:<id>` is a review comment with an excerpt of its body.
 
-The upload is stricter than the local report about what belongs to a picked project. Left out:
+The upload is stricter than the local report, which keeps a finding when some of its evidence
+is in a picked project and an idea when some of its findings are kept. A model wrote each text
+from all of its sources, so here it is all or nothing:
 
-- a finding or recommendation about a project that is not picked;
-- a finding about all projects together (`project` null) when any evidence stored for it
-  comes from a project that is not picked now. The model wrote its title and detail from that
-  evidence, so the text may describe the unpicked project even with the evidence cut away;
-- a recommendation left citing no finding. One that keeps some findings lists only those, and
-  only their evidence.
+- a finding is sent only when every piece of evidence stored for it is in the bundle: a turn of
+  a session that is sent, or a CI or review event of a picked project's repo. Evidence that
+  belongs to no known project counts as outside;
+- a recommendation is sent only when every finding it was built from is sent;
+- both must be about a picked project, or about all picked projects together (`project` null).
 
 A `project` that is not null always names a key in the manifest. The dry run says how many
-findings and ideas were left out.
+findings and ideas the report shows that the upload leaves out.
 
 Finding and recommendation ids are counters in one machine's database. They are unique only
 inside one `findings.json`: store them under (user, machine).
@@ -187,7 +198,15 @@ The same function shortens home-folder paths in text (`/Users/<name>`, `/home/<n
 `C:\Users\<name>`) to `~`, so a transcript does not carry the user's login name that way.
 The dry run reports both counts.
 
+The text of a finding or an idea is written by a model. It is not checked for the names of
+projects that were not picked; the rules under findings.json leave out the items most likely to
+carry them.
+
 ## Left out, and why
+
+- **Other people's sessions**: any session that names an author.
+- **A separate index of the per-session counts**, apart from the transcripts: the first server
+  does not need one, and a later format can add it.
 
 - **Unpicked projects**, but for their count: a folder name can be a client's name.
 - **Absolute folder paths** as fields: the server needs a project's identity, not where it sits on disk.

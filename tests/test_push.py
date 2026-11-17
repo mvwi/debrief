@@ -46,7 +46,10 @@ def fill(conn) -> None:
                  "VALUES (2, 'r1', 'correction_pattern', 'Gamma thing', 'gamma detail', ?, ?)",
                  (json.dumps([{"session_id": "g1", "msg_idx": 0}]), GAMMA))
     conn.execute("INSERT INTO recommendations (rec_id, run_id, priority, lever, title, problem, change, finding_ids, project) "
-                 f"VALUES (1, 'r1', 1, 'agent_config', 'Say how to deploy', 'p', 'c {TOKEN}', '[1, 2]', ?)", (ALPHA,))
+                 f"VALUES (1, 'r1', 1, 'agent_config', 'Say how to deploy', 'p', 'c {TOKEN}', '[1]', ?)", (ALPHA,))
+    # An idea about a picked project that also stood on the unpicked project's finding.
+    conn.execute("INSERT INTO recommendations (rec_id, run_id, priority, lever, title, problem, change, finding_ids, project) "
+                 "VALUES (5, 'r1', 5, 'agent_config', 'Lemur idea', 'p', 'c', '[1, 2]', ?)", (ALPHA,))
 
 
 def push(home: Path, *args: str, picked=(ALPHA, BETA), change=None) -> subprocess.CompletedProcess:
@@ -102,13 +105,14 @@ def test_bundle_holds_picked_projects_only_and_no_planted_token(tmp_path):
     assert TOKEN.encode() not in data and b"A1b2C3d4E" not in data
     assert b"[redacted]" in data
     # The unpicked project: not its name, its session, its text, its label or its finding.
-    for private in (b"acme", b"g1", b"gamma", b"Gamma"):
+    for private in (b"acme", b"g1", b"gamma", b"Gamma", b"Lemur"):
         assert private not in data
     assert manifest["unpicked"] == 1
     # No folder path in the manifest; projects go by repo, or by a hash on this machine.
     assert "/home/me" not in json.dumps(manifest)
     keys = {p["name"]: p["key"] for p in manifest["projects"]}
     assert keys["alpha"] == "octo/alpha" and keys["beta"].startswith("local:")
+    assert manifest["redaction"] == 0 and "Left out 0 findings and 1 ideas" in got.stdout
     assert manifest["format"] == 1 and manifest["machine"] == (tmp_path / "machine_id").read_text()
 
     # Every object is listed with the hash and size of the file that was written.
@@ -180,25 +184,62 @@ def shared_findings(conn) -> None:
                      "VALUES (?, 'r1', ?, 'team_practice', ?, 'p', 'c', ?, ?)",
                      [(2, 2, "Quokka idea", "[4]", GAMMA),   # about an unpicked project, citing a finding that is kept
                       (3, 3, "Wombat idea", "[3]", None),    # cites only a finding that is left out
-                      (4, 4, "Otter idea", "[3, 4]", None)])  # keeps the one finding that stays
+                      (4, 4, "Otter idea", "[3, 4]", None),   # one of its two findings is left out
+                      (6, 6, "Ibis idea", "[4]", None)])      # every finding it cites is kept
 
 
 def test_findings_and_ideas_that_draw_on_an_unpicked_project_are_left_out(tmp_path):
     got = push(tmp_path, "--dry-run", change=shared_findings)
     assert got.returncode == 0, got.stderr
     _, data = read(tmp_path / "push")
-    for private in (b"Zebra", b"zebra-detail", b"Quokka", b"Wombat", b"acme", b"gamma", b"Gamma"):
+    for private in (b"Zebra", b"zebra-detail", b"Quokka", b"Wombat", b"Otter", b"Lemur", b"acme", b"gamma", b"Gamma"):
         assert private not in data, private
     found = json.loads((tmp_path / "push" / "findings.json").read_text())
     assert sorted(found["findings"]) == ["1", "4"] and found["findings"]["4"]["project"] is None
     ideas = {r["title"]: r for r in found["recommendations"]}
-    assert sorted(ideas) == ["Otter idea", "Say how to deploy"]
-    assert ideas["Otter idea"]["findings"] == [4] and ideas["Otter idea"]["evidence_all"] == 2
-    assert set(ideas["Otter idea"]["evidence"]) == {"m:a1:2", "m:b1:0"} and "m:g1:0" not in found["refs"]
-    assert "Left out 1 findings and 2 ideas: they draw on projects you have not picked" in got.stdout
+    assert sorted(ideas) == ["Ibis idea", "Say how to deploy"]
+    assert ideas["Ibis idea"]["findings"] == [4] and set(ideas["Ibis idea"]["evidence"]) == {"m:a1:2", "m:b1:0"}
+    assert "m:g1:0" not in found["refs"]
+    assert "Left out 1 findings and 4 ideas: they draw on projects you have not picked" in got.stdout
 
     # With beta unpicked too, the finding that drew on it goes, and the idea that stood on it.
     got = push(tmp_path, "--dry-run", picked=(ALPHA,))
     _, data = read(tmp_path / "push")
-    assert b"Heron" not in data and b"heron-detail" not in data and b"Otter" not in data and b"beta" not in data
-    assert "Left out 2 findings and 3 ideas" in got.stdout
+    assert b"Heron" not in data and b"heron-detail" not in data and b"Ibis" not in data and b"beta" not in data
+    assert "Left out 2 findings and 5 ideas" in got.stdout
+
+
+def test_a_finding_about_one_project_goes_when_its_evidence_reaches_outside(tmp_path):
+    def reach(conn):
+        conn.execute("INSERT INTO findings (finding_id, run_id, kind, title, detail, evidence, project) "
+                     "VALUES (7, 'r1', 'hotspot', 'Puffin spot', 'puffin-detail', ?, ?)",
+                     (json.dumps([{"session_id": "a1", "msg_idx": 2}, {"session_id": "g1", "msg_idx": 0}]), ALPHA))
+
+    got = push(tmp_path, "--dry-run", change=reach)
+    _, data = read(tmp_path / "push")
+    assert b"Puffin" not in data and b"puffin-detail" not in data and b"Wrong deploys" in data
+    assert "Left out 1 findings and 1 ideas" in got.stdout
+
+
+def test_sessions_that_name_an_author_are_other_peoples_and_are_left_out(tmp_path):
+    def teammate(conn):
+        conn.execute("INSERT INTO sessions (session_id, agent, author, started_at, last_activity_at, cwd, prompt) "
+                     "VALUES ('t1', 'Claude Code', 'bob', '2026-01-06T10:00:00Z', '2026-01-06T11:00:00Z', ?, 'narwhal plan')",
+                     (ALPHA,))
+        conn.execute("INSERT INTO messages (session_id, idx, role, user_kind, text) VALUES ('t1', 0, 'user', 'human', 'narwhal plan')")
+        conn.execute("INSERT INTO findings (finding_id, run_id, kind, title, detail, evidence, project) "
+                     "VALUES (8, 'r1', 'hotspot', 'Walrus spot', 'walrus-detail', ?, ?)",
+                     (json.dumps([{"session_id": "a1", "msg_idx": 2}, {"session_id": "t1", "msg_idx": 0}]), ALPHA))
+        conn.execute("INSERT INTO recommendations (rec_id, run_id, priority, lever, title, problem, change, finding_ids, project) "
+                     "VALUES (9, 'r1', 9, 'agent_config', 'Marmot idea', 'p', 'c', '[1, 8]', ?)", (ALPHA,))
+
+    got = push(tmp_path, "--dry-run", change=teammate)
+    assert got.returncode == 0, got.stderr
+    manifest, data = read(tmp_path / "push")
+    for private in (b"narwhal", b"t1", b"bob", b"Walrus", b"walrus-detail", b"Marmot"):
+        assert private not in data, private
+    assert "sessions/t1.json" not in manifest["objects"]
+    alpha = next(p for p in manifest["projects"] if p["name"] == "alpha")
+    assert (alpha["sessions"], alpha["turns"]) == (2, 3)  # a1 and the odd-id session; not the teammate's
+    assert "Left out 1 sessions: they are other people's" in got.stdout
+    assert "Left out 1 findings and 2 ideas" in got.stdout

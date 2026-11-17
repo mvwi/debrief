@@ -35,6 +35,7 @@ from debrief.paths import HOME, NAME
 from debrief.synthesize import ref_project
 
 FORMAT = 1
+REDACTION = 0  # shortcut: becomes debrief.redact.VERSION with the swap described at scrub()
 MACHINE_PATH = HOME / "machine_id"
 DEFAULT_OUT = HOME / "push"
 SAFE_NAME = re.compile(r"[A-Za-z0-9_-][\w.-]*", re.ASCII)  # a session id that can be a file name as it is
@@ -87,15 +88,18 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
            for r in rows if r["picked"]}
 
     raw: dict[str, object] = {}
-    sessions, _ = sessions_section(conn, labels, "", picked)
+    every, _ = sessions_section(conn, labels, "", picked)
+    # A session with an author came from Entire and may be a teammate's; a server would file it
+    # under whoever pushed. Local logs name no author.
+    sessions = [s for s in every if not s["author"]]
     for s in sessions:
         raw[object_path(s["id"])] = {**s, "project": key[s["project"]], **session_file(conn, labels, s["id"])}
     ids = {s["id"] for s in sessions}
 
     findings, recs, refs = findings_and_recs(conn, labels, run_id, picked)
     found, ideas = len(findings), len(recs)
-    findings, recs, refs = only_picked(conn, findings, recs, refs, key)
-    left_out = {"findings": found - len(findings), "ideas": ideas - len(recs)}
+    findings, recs, refs = only_picked(conn, findings, recs, refs, key, ids)
+    left_out = {"findings": found - len(findings), "ideas": ideas - len(recs), "sessions": len(every) - len(sessions)}
     if findings or recs:
         for item in (*findings.values(), *recs):
             item["project"] = item["project"] and key[item["project"]]
@@ -122,10 +126,14 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
         objects[path] = {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
         if have.get(path) != objects[path]["sha256"]:
             send[path] = body
-    projects, n = scrub([{"key": key[r["path"]], "name": r["name"], "sessions": r["sessions"], "turns": r["turns"],
+    count, turns = Counter(s["project"] for s in sessions), Counter()
+    for s in sessions:
+        turns[s["project"]] += s["human_turns"]
+    projects, n = scrub([{"key": key[r["path"]], "name": r["name"], "sessions": count[r["path"]], "turns": turns[r["path"]],
                           "analysed_at": r["analysed_at"]} for r in rows if r["picked"]], home_paths=True)
     counts.update(n)
     manifest = {"format": FORMAT, "tool": f"{NAME} {version('debrief-cli')}", "machine": machine,
+                "redaction": REDACTION,
                 "projects": projects, "unpicked": sum(not r["picked"] for r in rows),
                 "objects": objects, "sent": sorted(send)}
     stats = {
@@ -139,33 +147,29 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
     return manifest, send, stats
 
 
-def only_picked(conn, findings: dict, recs: list, refs: dict, key: dict[str, str]) -> tuple[dict, list, dict]:
+def only_picked(conn, findings: dict, recs: list, refs: dict, key: dict[str, str], ids: set[str]) -> tuple[dict, list, dict]:
     """Cut the report's findings and ideas down to what an upload may hold. The report's own rule
-    keeps a finding when some of its evidence is in a picked project; that is too loose to send.
+    keeps a finding when some of its evidence is in a picked project, and an idea when some of
+    its findings are kept; a model wrote each text from all of them, so that is too loose to send.
 
-    Left out: a finding or idea about a project with no key (so not picked); a finding about all
-    projects together when any of its stored evidence is outside the picked ones, since its text
-    may still describe them; an idea left citing no finding.
+    Kept: a finding whose stored evidence is all in the bundle (turns of sessions `ids`, events
+    of a picked project's repo), and an idea whose stored findings are all kept. Either must be
+    about a project with a key, or about all of them.
     """
     project, repos = session_projects(conn), repo_projects(conn)
 
-    def all_picked(finding_id: int) -> bool:
-        stored = conn.execute("SELECT evidence FROM findings WHERE finding_id = ?", (finding_id,)).fetchone()[0]
-        return all(ref_project(conn, project, repos, e) in key for e in json.loads(stored or "[]"))
+    def in_bundle(ref: dict) -> bool:
+        return ref["session_id"] in ids if "session_id" in ref else ref_project(conn, project, repos, ref) in key
 
-    findings = {i: f for i, f in findings.items()
-                if (f["project"] in key if f["project"] is not None else all_picked(i))}
-    kept = []
-    for r in recs:
-        ids = [i for i in r["findings"] if i in findings]
-        if not ids or r["project"] not in (None, *key):
-            continue
-        cited = {e for i in ids for e in findings[i]["evidence"]}
-        evidence = [e for e in r["evidence"] if e in cited]
-        kept.append({**r, "findings": ids, "evidence": evidence, "evidence_all": len(cited),
-                     "weak": r["checked"] and not evidence})
+    def stored(table: str, column: str, id_column: str, row_id: int) -> list:
+        return json.loads(conn.execute(f"SELECT {column} FROM {table} WHERE {id_column} = ?", (row_id,)).fetchone()[0] or "[]")
+
+    findings = {i: f for i, f in findings.items() if f["project"] in (None, *key)
+                and all(in_bundle(e) for e in stored("findings", "evidence", "finding_id", i))}
+    recs = [r for r in recs if r["project"] in (None, *key)
+            and all(i in findings for i in stored("recommendations", "finding_ids", "rec_id", r["id"]))]
     cited = {e for f in findings.values() for e in f["evidence"]}
-    return findings, kept, {i: ref for i, ref in refs.items() if i in cited}
+    return findings, recs, {i: ref for i, ref in refs.items() if i in cited}
 
 
 def write(out: Path, manifest: dict, send: dict[str, bytes]) -> int:
@@ -219,9 +223,12 @@ def main(argv: list[str] | None = None) -> None:
         gone = sum(path.startswith("sessions/") for path in stats["removed"])
         print(f"  This push removes {gone} session{'' if gone == 1 else 's'} the server holds "
               f"({len(stats['removed'])} object{'' if len(stats['removed']) == 1 else 's'} no longer in a picked project).")
-    if any(stats["left_out"].values()):
-        print(f"  Left out {stats['left_out']['findings']} findings and {stats['left_out']['ideas']} ideas: "
-              "they draw on projects you have not picked.")
+    out = stats["left_out"]
+    if out["sessions"]:
+        print(f"  Left out {out['sessions']} sessions: they are other people's (they name an author).")
+    if out["findings"] or out["ideas"]:
+        print(f"  Left out {out['findings']} findings and {out['ideas']} ideas: "
+              "they draw on projects you have not picked or on sessions that are not sent.")
     if made:
         print(f"  Made an id for this machine, a random number kept in {MACHINE_PATH}.")
     print("Redaction is pattern-based: read the bundle before you trust it.")
