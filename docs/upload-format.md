@@ -208,7 +208,7 @@ works on patterns, so it misses a secret with no known shape.
 
 The same function shortens home-folder paths in text (`/Users/<name>`, `/home/<name>`,
 `C:\Users\<name>`) to `~`, so a transcript does not carry the user's login name that way.
-It also replaces email addresses, wherever they appear. GitHub user names are kept: review rows
+It also replaces each email address, wherever it appears, with `[email]`. GitHub user names are kept: review rows
 and PR data are no use without them. The dry run reports the three counts.
 
 The text of a finding or an idea is written by a model. It is not checked for the names of
