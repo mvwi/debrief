@@ -33,11 +33,11 @@ def write(path: Path, entries: list[dict], tail: str = "") -> Path:
 
 
 def codex_entries(session_id: str, prompt: str, source: str = "vscode", originator: str = "codex_cli_rs",
-                  more: tuple[str, ...] = ()) -> list[dict]:
+                  more: tuple[str, ...] = (), **meta) -> list[dict]:
     def item(kind: str, payload: dict, second: int) -> dict:
         return {"timestamp": f"2026-01-03T09:00:{second:02}.000Z", "type": kind, "payload": payload}
     return [
-        item("session_meta", {"id": session_id, "cwd": "/work/api", "source": source, "originator": originator}, 0),
+        item("session_meta", {"id": session_id, "cwd": "/work/api", "source": source, "originator": originator} | meta, 0),
         item("turn_context", {"model": "gpt-test"}, 1),
         item("response_item", {"type": "message", "role": "user", "content": [{"type": "input_text", "text": prompt}]}, 2),
         item("response_item", {"type": "message", "role": "assistant",
@@ -425,3 +425,51 @@ def test_a_parser_change_reaches_logs_that_have_not_changed(conn, tmp_path, monk
     assert run(conn, tmp_path) == {"unchanged": 1}
     conn.execute("UPDATE source_logs SET parser = NULL")  # a home from before the column existed
     assert run(conn, tmp_path) == {"loaded": 1}
+
+
+def test_a_removed_worktree_keeps_the_repo_git_gave_it(conn, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    worktree = tmp_path / "tool/worktrees/wren"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {repo}/.git/worktrees/wren\n")
+    log = write(tmp_path / "claude/a/w1.jsonl", claude_entries("w1", [("u1", "a")], cwd=str(worktree)))
+    run(conn, tmp_path)
+    (worktree / ".git").unlink()
+    worktree.rmdir()
+
+    def projects() -> dict:
+        return dict(conn.execute("SELECT session_id, cwd FROM sessions"))
+
+    # The log grows after the worktree is gone, and a later session's log names a folder inside it.
+    write(log, claude_entries("w1", [("u1", "a"), ("u2", "b")], cwd=str(worktree)))
+    write(tmp_path / "claude/a/w2.jsonl", claude_entries("w2", [("u3", "c")], cwd=str(worktree / "pkg")))
+    write(tmp_path / "claude/b/w3.jsonl", claude_entries("w3", [("u4", "d")], cwd=str(tmp_path / "tool/worktrees/owl")))
+    assert run(conn, tmp_path)["loaded"] == 3
+    # w3's folder was never seen while it existed: nothing says which repo it was in.
+    assert projects() == {"w1": str(repo), "w2": str(repo), "w3": str(tmp_path / "tool/worktrees/owl")}
+    monkeypatch.setattr(sources, "PARSER_VERSION", sources.PARSER_VERSION + 1)  # every log is read again
+    assert run(conn, tmp_path)["loaded"] == 3
+    assert projects()["w1"] == projects()["w2"] == str(repo)
+
+
+def test_a_codex_log_names_its_repo(conn, tmp_path):
+    git = {"git": {"repository_url": "git@github.com:acme/app.git", "branch": "main"}}
+    for sid in ("c1", "c2"):
+        write(tmp_path / f"codex/rollout-{sid}.jsonl", codex_entries(sid, f"{sid} in the checkout", **git, cwd="/work/app"))
+    write(tmp_path / "codex/rollout-c3.jsonl", codex_entries("c3", "in a worktree since removed", cwd="/tool/worktrees/wren",
+                                                             git={"repository_url": "https://github.com/acme/app"}))
+    write(tmp_path / "codex/rollout-c4.jsonl", codex_entries("c4", "no git", cwd="/tool/worktrees/owl"))
+    write(tmp_path / "claude/a/s1.jsonl", claude_entries("s1", [("u1", "a")]))
+    run(conn, tmp_path)
+    assert dict(conn.execute("SELECT session_id, remote FROM sessions")) == {
+        "c1": "acme/app", "c2": "acme/app", "c3": "acme/app", "c4": "", "s1": ""}
+    projects = db.session_projects(conn)
+    assert projects["c3"] == "/work/app" and projects["c4"] == "/tool/worktrees/owl"
+
+    # A database from before the column: Codex logs are read once more, and only once.
+    conn.execute("UPDATE sessions SET remote = NULL")
+    conn.commit()
+    assert run(conn, tmp_path) == {"loaded": 4, "unchanged": 1}
+    assert conn.execute("SELECT remote FROM sessions WHERE session_id = 'c3'").fetchone()[0] == "acme/app"
+    assert run(conn, tmp_path) == {"unchanged": 5}

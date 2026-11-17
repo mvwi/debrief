@@ -254,6 +254,9 @@ CREATE TABLE IF NOT EXISTS evidence_checks (
 # tables, so connect() adds any that are missing.
 ADDED_COLUMNS = [
     ("sessions", "cwd", "TEXT"),
+    # GitHub owner/name of the checkout, when the log itself records it (Codex); '' when it does
+    # not, NULL in rows from before this column.
+    ("sessions", "remote", "TEXT"),
     # What the headless rule needs, kept so a re-run can apply it to a log without reading it.
     ("source_logs", "launcher", "TEXT"),         # as logged: Claude entrypoints, Codex "originator|source"; NULL in rows from before this column
     ("source_logs", "human_turns", "INTEGER"),   # after copied entries are left out; NULL when the log was not parsed
@@ -295,10 +298,15 @@ def add_repo(conn: sqlite3.Connection) -> None:
             conn.execute(f"UPDATE {table} SET repo = ?", (repo,))
 
 
+# What ties a session to a GitHub repo: a PR it worked on, or the remote its own log records.
+REPO_LINKS = """SELECT session_id, repo FROM session_pr_links
+    UNION SELECT session_id, remote FROM main.sessions WHERE remote != ''"""
+
+
 def repo_projects(conn: sqlite3.Connection) -> dict[str, str]:
-    """Each GitHub repo's project: the folder most of the sessions linked to its PRs ran in."""
-    rows = conn.execute("""
-        SELECT l.repo, s.cwd FROM main.sessions s JOIN session_pr_links l USING (session_id)
+    """Each GitHub repo's project: the folder most of the sessions tied to it (REPO_LINKS) ran in."""
+    rows = conn.execute(f"""
+        SELECT l.repo, s.cwd FROM main.sessions s JOIN ({REPO_LINKS}) l USING (session_id)
         WHERE s.cwd IS NOT NULL GROUP BY l.repo, s.cwd ORDER BY COUNT(DISTINCT l.session_id), s.cwd DESC""")
     return {repo: cwd for repo, cwd in rows}  # the last row per repo has the most sessions
 
@@ -306,14 +314,14 @@ def repo_projects(conn: sqlite3.Connection) -> dict[str, str]:
 def session_projects(conn: sqlite3.Connection) -> dict[str, str | None]:
     """session_id -> project, for every stage. A project is the folder the session ran in.
 
-    A session with a PR in a repo whose project is another folder belongs to that project,
-    unless its own folder is some repo's project: a worktree that ingest did not resolve
-    still lands in its repo this way.
+    A session tied to a repo (REPO_LINKS) whose project is another folder belongs to that
+    project, unless its own folder is some repo's project: a worktree that ingest did not
+    resolve still lands in its repo this way.
     """
     repos = repo_projects(conn)
     out = dict(conn.execute("SELECT session_id, cwd FROM main.sessions"))
     homes = set(repos.values())
-    for sid, repo in conn.execute("SELECT session_id, repo FROM session_pr_links ORDER BY repo DESC"):
+    for sid, repo in conn.execute(f"{REPO_LINKS} ORDER BY repo DESC"):
         if out.get(sid) not in homes and repo in repos:
             out[sid] = repos[repo]
     return out
