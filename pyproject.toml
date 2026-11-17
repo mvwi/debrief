@@ -5,7 +5,8 @@ version = "0.1.0"
 description = "Review your coding-agent sessions: what went wrong, and what to change."
 readme = "README.md"
 requires-python = ">=3.13"
-# No licence yet: the owner picks one. Add a LICENSE file and `license = "<SPDX id>"` here.
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["coding-agent", "claude-code", "codex", "session-logs", "report"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -18,6 +19,10 @@ dependencies = [
     "httpx>=0.28.1",
     "python-dotenv>=1.2.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mvwi/debrief"
+Issues = "https://github.com/mvwi/debrief/issues"
 
 [project.scripts]
 debrief = "debrief.cli:main"
