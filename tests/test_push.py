@@ -137,6 +137,7 @@ def test_bundle_holds_picked_projects_only_and_no_planted_token(tmp_path):
                  "Made an id for this machine"):
         assert line in got.stdout, line
     assert int(got.stdout.split("redactions  ")[1].split()[0]) >= 7 and "home-folder paths shortened to ~" in got.stdout
+    assert "email addresses replaced" in got.stdout and "Upload only what you have the right to share" in got.stdout
     assert str(len(data)) in got.stdout.replace(",", "")
 
 

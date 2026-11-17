@@ -43,15 +43,15 @@ NO_SERVER = (f"{NAME}: there is no server to push to yet. "
              f"`{NAME} push --dry-run` builds what would be sent and sends nothing.")
 
 
-def scrub(obj, *, home_paths: bool = False) -> tuple[Any, dict[str, int]]:
-    """(scrubbed copy, {"secrets": n, "home_paths": n}). The one door to redaction."""
+def scrub(obj, *, home_paths: bool = False, emails: bool = False) -> tuple[Any, dict[str, int]]:
+    """(scrubbed copy, {"secrets": n, "home_paths": n, "emails": n}). The one door to redaction."""
     # shortcut: stands in for debrief.redact.scrub, which has this signature; replace this function
-    # with `from debrief.redact import scrub` when that module lands. Until then home paths are not
-    # rewritten, and secrets are counted by the marker, so text that already said "[redacted]" hides a hit.
+    # with `from debrief.redact import scrub` when that module lands. Until then home paths and
+    # email addresses are left as they are, and secrets are counted by the marker, so text that already said "[redacted]" hides a hit.
     from debrief.export_site import redact_tree
     out = redact_tree(obj)
     marks = [json.dumps(x, ensure_ascii=False).count("[redacted]") for x in (out, obj)]
-    return out, {"secrets": max(marks[0] - marks[1], 0), "home_paths": 0}
+    return out, {"secrets": max(marks[0] - marks[1], 0), "home_paths": 0, "emails": 0}
 
 
 def machine_id() -> tuple[str, bool]:
@@ -120,7 +120,7 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
 
     counts, objects, send = Counter(), {}, {}
     for path, obj in raw.items():
-        clean, n = scrub(obj, home_paths=True)
+        clean, n = scrub(obj, home_paths=True, emails=True)
         counts.update(n)
         body = json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         objects[path] = {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
@@ -130,7 +130,7 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
     for s in sessions:
         turns[s["project"]] += s["human_turns"]
     projects, n = scrub([{"key": key[r["path"]], "name": r["name"], "sessions": count[r["path"]], "turns": turns[r["path"]],
-                          "analysed_at": r["analysed_at"]} for r in rows if r["picked"]], home_paths=True)
+                          "analysed_at": r["analysed_at"]} for r in rows if r["picked"]], home_paths=True, emails=True)
     counts.update(n)
     manifest = {"format": FORMAT, "tool": f"{NAME} {version('debrief-cli')}", "machine": machine,
                 "redaction": REDACTION,
@@ -140,7 +140,7 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
         "sessions": len(sessions), "sessions_sent": sum(p.startswith("sessions/") for p in send),
         "turns": sum(s["human_turns"] for s in sessions),
         "messages": sum(len(raw[object_path(s["id"])]["messages"]) for s in sessions),
-        "secrets": counts["secrets"], "home_paths": counts["home_paths"],
+        "secrets": counts["secrets"], "home_paths": counts["home_paths"], "emails": counts["emails"],
         "repos": sorted({k for k in key.values() if not k.startswith("local:")} | {k.rsplit("#", 1)[0] for k in prs}),
         "removed": sorted(set(have) - set(objects)), "left_out": left_out,
     }
@@ -216,7 +216,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  sessions    {stats['sessions']}, of which {stats['sessions_sent']} sent"
           f"{' (the rest have not changed)' if have is not None else ''}")
     print(f"  turns       {stats['turns']} of yours, {stats['messages']} messages in all")
-    print(f"  redactions  {stats['secrets']} secrets replaced with [redacted], "
+    print(f"  redactions  {stats['secrets']} secrets and {stats['emails']} email addresses replaced, "
           f"{stats['home_paths']} home-folder paths shortened to ~")
     print(f"  repo names  {', '.join(stats['repos']) or 'none'}")
     if stats["removed"]:
@@ -232,6 +232,8 @@ def main(argv: list[str] | None = None) -> None:
     if made:
         print(f"  Made an id for this machine, a random number kept in {MACHINE_PATH}.")
     print("Redaction is pattern-based: read the bundle before you trust it.")
+    print("Upload only what you have the right to share: transcripts hold your employer's or clients' code "
+          "and other people's names.")
 
 
 if __name__ == "__main__":

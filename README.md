@@ -87,7 +87,8 @@ Unticking it on the Projects page does the same.
 - `debrief push --dry-run` writes a folder (`~/.local/share/debrief/push`, or `--out DIR`) that
   holds transcript text from your picked projects, and sends nothing. No upload exists yet:
   `debrief push` without `--dry-run` refuses. [docs/upload-format.md](docs/upload-format.md)
-  says what the folder holds.
+  says what the folder holds. Upload only what you have the right to share: transcripts hold
+  your employer's or clients' code and other people's names.
 - The report holds your transcripts. `debrief open` serves it on 127.0.0.1 only.
 - Secrets are replaced with `[redacted]` in the report and in anything debrief uploads. The text
   sent to the model for labeling and synthesis is not redacted. Three things are caught: known

@@ -180,6 +180,11 @@ bundle as what the server holds.
 A server should check each received object against its `sha256` and `bytes`, and apply a
 push whole or not at all.
 
+Before a user's first real push, the client must ask them once to confirm they have the right
+to share what they upload: transcripts hold their employer's or clients' code and other people's
+names. The dry run prints that as a notice. The confirmation is not built; whoever builds the
+upload builds it, and the server's sign-up is the other place to say it.
+
 Hashes are over the bytes after redaction. A debrief release that changes the redaction
 patterns changes the bytes of every object the new patterns touch, so those objects are sent
 again. That is intended: the server's copy then matches what the newer patterns allow.
@@ -196,7 +201,8 @@ works on patterns, so it misses a secret with no known shape.
 
 The same function shortens home-folder paths in text (`/Users/<name>`, `/home/<name>`,
 `C:\Users\<name>`) to `~`, so a transcript does not carry the user's login name that way.
-The dry run reports both counts.
+It also replaces email addresses, wherever they appear. GitHub user names are kept: review rows
+and PR data are no use without them. The dry run reports the three counts.
 
 The text of a finding or an idea is written by a model. It is not checked for the names of
 projects that were not picked; the rules under findings.json leave out the items most likely to
