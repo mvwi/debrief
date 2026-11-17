@@ -77,7 +77,7 @@ def read(out: Path) -> tuple[dict, bytes]:
 
 def test_push_without_dry_run_refuses(tmp_path):
     got = push(tmp_path)
-    assert got.returncode != 0 and "no server" in got.stderr
+    assert got.returncode == 1 and "no server" in got.stderr and got.stdout == ""
     assert not (tmp_path / "push").exists() and not (tmp_path / "machine_id").exists()
 
 
