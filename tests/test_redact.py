@@ -207,6 +207,7 @@ NOT_EMAILS = [
     "git remote add origin git@github.com:owner/name.git", "ssh -T git@github.com", "scp deploy@build.example.net:/srv/app .",
     "https://deploy@build.example.net/x", "npm i @scope/pkg@1.2.3 react@19.3.1 next@16.4.4-canary.rc", "pnpm@12.15.0",
     "@app.route('/x')", "@dataclass", "thanks @octocat, see owner/name#12", "icons/logo@2x.png", "python@3.14",
+    "docker pull registry:5000/app:tag@sha256:0a1b2c", "npm i alias@npm:pkg@1.2.3", "ssh -p 22 host:deploy@build.example.net:/srv",
     "charm.land/lipgloss/v2@v2.0.6", "psql postgresql://postgres@127.0.0.1:5432/db", "WEB @type:session -@session.initial_view.name:/x",
 ]
 
@@ -217,10 +218,16 @@ def test_emails():
     out, counts = scrub(text, emails=True)
     assert out == 'to: ["[email]"], cc <[email]>; author [email]' and counts["emails"] == 3
     assert scrub(text)[0] == text and redact(text) == text   # off by default, and never in the local report
+    after_colon = 'mailto:jane@example.com owner:bob.roe@example.org {"email":"x"} cc:a1@example.net, reviewer:jane@example.com: ok'
+    assert scrub(after_colon, emails=True) == ('mailto:[email] owner:[email] {"email":"x"} cc:[email], reviewer:[email]: ok',
+                                               {"secrets": 0, "home_paths": 0, "emails": 4})
+    # URL credentials go to the secret rule, whose marker the email rule cannot read as an address.
+    assert scrub("postgres://app:hunter2pw@db.example.com/x https://bob:pw12@example.com", emails=True) == (
+        "postgres://[redacted]@db.example.com/x https://[redacted]@example.com", {"secrets": 2, "home_paths": 0, "emails": 0})
     for kept in NOT_EMAILS:
         assert scrub(kept, emails=True) == (kept, {"secrets": 0, "home_paths": 0, "emails": 0}), kept
 
 
 def test_version():
     from debrief.redact import VERSION
-    assert VERSION == 1
+    assert VERSION == 2
