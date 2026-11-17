@@ -99,6 +99,18 @@ The latest analysis run, cut down to the picked projects. Absent when there are 
   agent text before it. `e:check_failure:<id>` is a CI failure with the tail of its log.
   `e:review_comment:<id>` is a review comment with an excerpt of its body.
 
+The upload is stricter than the local report about what belongs to a picked project. Left out:
+
+- a finding or recommendation about a project that is not picked;
+- a finding about all projects together (`project` null) when any evidence stored for it
+  comes from a project that is not picked now. The model wrote its title and detail from that
+  evidence, so the text may describe the unpicked project even with the evidence cut away;
+- a recommendation left citing no finding. One that keeps some findings lists only those, and
+  only their evidence.
+
+A `project` that is not null always names a key in the manifest. The dry run says how many
+findings and ideas were left out.
+
 Finding and recommendation ids are counters in one machine's database. They are unique only
 inside one `findings.json`: store them under (user, machine).
 

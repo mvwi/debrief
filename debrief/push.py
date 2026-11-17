@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from debrief import config
-from debrief.db import connect, repo_projects
+from debrief.db import connect, repo_projects, session_projects
 from debrief.export_site import (
     ci_section,
     findings_and_recs,
@@ -32,6 +32,7 @@ from debrief.export_site import (
     sessions_section,
 )
 from debrief.paths import HOME, NAME
+from debrief.synthesize import ref_project
 
 FORMAT = 1
 MACHINE_PATH = HOME / "machine_id"
@@ -92,9 +93,12 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
     ids = {s["id"] for s in sessions}
 
     findings, recs, refs = findings_and_recs(conn, labels, run_id, picked)
+    found, ideas = len(findings), len(recs)
+    findings, recs, refs = only_picked(conn, findings, recs, refs, key)
+    left_out = {"findings": found - len(findings), "ideas": ideas - len(recs)}
     if findings or recs:
         for item in (*findings.values(), *recs):
-            item["project"] = key.get(item["project"])
+            item["project"] = item["project"] and key[item["project"]]
         for ref in refs.values():
             if "sessions" in ref:  # a CI or review event names every session on its PR; keep the bundled ones
                 ref["sessions"] = [sid for sid in ref["sessions"] if sid in ids]
@@ -130,9 +134,38 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
         "messages": sum(len(raw[object_path(s["id"])]["messages"]) for s in sessions),
         "secrets": counts["secrets"], "home_paths": counts["home_paths"],
         "repos": sorted({k for k in key.values() if not k.startswith("local:")} | {k.rsplit("#", 1)[0] for k in prs}),
-        "removed": sorted(set(have) - set(objects)),
+        "removed": sorted(set(have) - set(objects)), "left_out": left_out,
     }
     return manifest, send, stats
+
+
+def only_picked(conn, findings: dict, recs: list, refs: dict, key: dict[str, str]) -> tuple[dict, list, dict]:
+    """Cut the report's findings and ideas down to what an upload may hold. The report's own rule
+    keeps a finding when some of its evidence is in a picked project; that is too loose to send.
+
+    Left out: a finding or idea about a project with no key (so not picked); a finding about all
+    projects together when any of its stored evidence is outside the picked ones, since its text
+    may still describe them; an idea left citing no finding.
+    """
+    project, repos = session_projects(conn), repo_projects(conn)
+
+    def all_picked(finding_id: int) -> bool:
+        stored = conn.execute("SELECT evidence FROM findings WHERE finding_id = ?", (finding_id,)).fetchone()[0]
+        return all(ref_project(conn, project, repos, e) in key for e in json.loads(stored or "[]"))
+
+    findings = {i: f for i, f in findings.items()
+                if (f["project"] in key if f["project"] is not None else all_picked(i))}
+    kept = []
+    for r in recs:
+        ids = [i for i in r["findings"] if i in findings]
+        if not ids or r["project"] not in (None, *key):
+            continue
+        cited = {e for i in ids for e in findings[i]["evidence"]}
+        evidence = [e for e in r["evidence"] if e in cited]
+        kept.append({**r, "findings": ids, "evidence": evidence, "evidence_all": len(cited),
+                     "weak": r["checked"] and not evidence})
+    cited = {e for f in findings.values() for e in f["evidence"]}
+    return findings, kept, {i: ref for i, ref in refs.items() if i in cited}
 
 
 def write(out: Path, manifest: dict, send: dict[str, bytes]) -> int:
@@ -186,6 +219,9 @@ def main(argv: list[str] | None = None) -> None:
         gone = sum(path.startswith("sessions/") for path in stats["removed"])
         print(f"  This push removes {gone} session{'' if gone == 1 else 's'} the server holds "
               f"({len(stats['removed'])} object{'' if len(stats['removed']) == 1 else 's'} no longer in a picked project).")
+    if any(stats["left_out"].values()):
+        print(f"  Left out {stats['left_out']['findings']} findings and {stats['left_out']['ideas']} ideas: "
+              "they draw on projects you have not picked.")
     if made:
         print(f"  Made an id for this machine, a random number kept in {MACHINE_PATH}.")
     print("Redaction is pattern-based: read the bundle before you trust it.")

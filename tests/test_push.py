@@ -167,3 +167,38 @@ def test_out_folder_that_is_not_a_bundle_is_left_alone(tmp_path):
     got = push(tmp_path, "--dry-run", "--out", str(out))
     assert got.returncode != 0 and "not an earlier bundle" in got.stderr
     assert [p.name for p in out.iterdir()] == ["notes.txt"]
+
+
+def shared_findings(conn) -> None:
+    """Findings about all projects together, and ideas that lean on them."""
+    both = json.dumps([{"session_id": "a1", "msg_idx": 2}, {"session_id": "b1", "msg_idx": 0}])
+    with_gamma = json.dumps([{"session_id": "a1", "msg_idx": 2}, {"session_id": "g1", "msg_idx": 0}])
+    conn.executemany("INSERT INTO findings (finding_id, run_id, kind, title, detail, evidence, project) "
+                     "VALUES (?, 'r1', 'prompt_practice', ?, ?, ?, NULL)",
+                     [(3, "Zebra habit", "zebra-detail about the client", with_gamma), (4, "Heron habit", "heron-detail", both)])
+    conn.executemany("INSERT INTO recommendations (rec_id, run_id, priority, lever, title, problem, change, finding_ids, project) "
+                     "VALUES (?, 'r1', ?, 'team_practice', ?, 'p', 'c', ?, ?)",
+                     [(2, 2, "Quokka idea", "[4]", GAMMA),   # about an unpicked project, citing a finding that is kept
+                      (3, 3, "Wombat idea", "[3]", None),    # cites only a finding that is left out
+                      (4, 4, "Otter idea", "[3, 4]", None)])  # keeps the one finding that stays
+
+
+def test_findings_and_ideas_that_draw_on_an_unpicked_project_are_left_out(tmp_path):
+    got = push(tmp_path, "--dry-run", change=shared_findings)
+    assert got.returncode == 0, got.stderr
+    _, data = read(tmp_path / "push")
+    for private in (b"Zebra", b"zebra-detail", b"Quokka", b"Wombat", b"acme", b"gamma", b"Gamma"):
+        assert private not in data, private
+    found = json.loads((tmp_path / "push" / "findings.json").read_text())
+    assert sorted(found["findings"]) == ["1", "4"] and found["findings"]["4"]["project"] is None
+    ideas = {r["title"]: r for r in found["recommendations"]}
+    assert sorted(ideas) == ["Otter idea", "Say how to deploy"]
+    assert ideas["Otter idea"]["findings"] == [4] and ideas["Otter idea"]["evidence_all"] == 2
+    assert set(ideas["Otter idea"]["evidence"]) == {"m:a1:2", "m:b1:0"} and "m:g1:0" not in found["refs"]
+    assert "Left out 1 findings and 2 ideas: they draw on projects you have not picked" in got.stdout
+
+    # With beta unpicked too, the finding that drew on it goes, and the idea that stood on it.
+    got = push(tmp_path, "--dry-run", picked=(ALPHA,))
+    _, data = read(tmp_path / "push")
+    assert b"Heron" not in data and b"heron-detail" not in data and b"Otter" not in data and b"beta" not in data
+    assert "Left out 2 findings and 3 ideas" in got.stdout
