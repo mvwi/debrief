@@ -132,3 +132,27 @@ def test_picked_projects_round_trip_and_survive_other_saves(cfg):
     assert config.projects() == odd
     config.save({"projects": {"include": []}})  # nothing picked: the table is not written
     assert config.projects() == [] and "projects" not in cfg.read_text()
+
+
+def test_drop_takes_a_picked_project_out_and_keeps_the_rest(cfg, monkeypatch, capsys):
+    cfg.write_text('[label]\nllm = "openrouter"\n[github]\nenabled = false\n')
+    monkeypatch.setenv("HOME", "/home/me")
+    for p in ("/home/me/alpha", "/home/me/beta", "/home/me/gamma"):
+        config.pick(p)
+    config.main(["--drop", "~/alpha", "--drop", "/home/me/x/../gamma/"])
+    out = capsys.readouterr().out
+    assert "dropped /home/me/alpha" in out and "dropped /home/me/gamma" in out
+    assert config.projects() == ["/home/me/beta"]
+    assert config.choose("label")[0] == "openrouter" and not config.github_enabled()
+    assert out.splitlines()[-1].split() == ["projects", "/home/me/beta"]
+
+
+def test_drop_of_a_project_that_is_not_picked_says_so_and_changes_nothing(cfg, capsys):
+    config.main(["--drop", "/home/me/alpha"])  # no config.toml at all
+    assert "/home/me/alpha is not picked" in capsys.readouterr().out and not cfg.exists()
+    config.pick("/home/me/beta")
+    before = cfg.read_text()
+    config.main(["--drop", "/home/me/alpha"])  # returns, so the exit code is 0
+    assert "/home/me/alpha is not picked" in capsys.readouterr().out and cfg.read_text() == before
+    config.main(["--drop", "/home/me/beta"])  # the last one
+    assert config.projects() == [] and "none picked" in capsys.readouterr().out

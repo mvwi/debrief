@@ -2,6 +2,7 @@
 
     debrief sync                 ingest local logs, label turns, find patterns, build the report
     debrief sync --project DIR   pick a project to analyse (kept in config.toml), then sync
+    debrief config --drop DIR    stop analysing a project you picked
     debrief sync --dry-run       ingest, then say what labeling would cost; no model calls
     debrief open                 serve the report on localhost and open it in the browser;
                                  the page can also start a sync, show its progress and stop it
@@ -53,7 +54,8 @@ def stage(name: str, argv: list[str]) -> None:
 def sync(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="debrief sync", description="Ingest local logs and rebuild the report.")
     p.add_argument("--project", metavar="DIR", action="append", default=[],
-                   help="Add this project to the ones sync analyses (repeatable; kept in config.toml)")
+                   help="Add this project to the ones sync analyses (repeatable; kept in config.toml). "
+                        "`debrief config --drop DIR` takes one out again")
     p.add_argument("--since", metavar="YYYY-MM-DD", help="Only logs and evidence from this date on")
     p.add_argument("--import", dest="import_dirs", action="append", default=[], metavar="DIR",
                    help="Also load a folder of JSONL logs (repeatable)")
@@ -119,7 +121,7 @@ def pick_projects(dirs: list[str]) -> bool:
     for r in rows:
         print(f"  {r['sessions']:>8} {r['turns']:>8}  {r['path']}{'  (picked)' if r['picked'] else ''}")
     print("\nPick one with `debrief sync --project DIR` (repeat the flag for more). "
-          "Picks are kept in config.toml under [projects].")
+          "Picks are kept in config.toml under [projects]; `debrief config --drop DIR` takes one out.")
     return False
 
 

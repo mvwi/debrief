@@ -10,7 +10,7 @@ Set in DEBRIEF_HOME/config.toml, one table per stage:
 
 `[projects] include = ["/abs/path", ...]` picks the projects to analyse: only their sessions
 are labeled, turned into findings and ideas, and shown in the report. With none picked, sync
-stops after ingest. `debrief sync --project DIR` adds one.
+stops after ingest. `debrief sync --project DIR` adds one; `debrief config --drop DIR` removes one.
 
 A flag beats an environment variable, which beats config.toml, which beats DEFAULTS.
 
@@ -18,6 +18,7 @@ The Settings page of `debrief open` writes config.toml, and keeps an OpenRouter 
 DEBRIEF_HOME/.env.
 """
 
+import argparse
 import json
 import os
 import re
@@ -26,7 +27,7 @@ import tomllib
 
 from dotenv import dotenv_values, find_dotenv, load_dotenv, set_key, unset_key
 
-from debrief.paths import HOME
+from debrief.paths import HOME, NAME
 
 CONFIG_PATH = HOME / "config.toml"
 ENV_PATH = HOME / ".env"
@@ -180,8 +181,22 @@ def pick(project: str) -> None:
         save({**cfg, "projects": {"include": [*projects(), project]}})
 
 
+def drop(project: str) -> bool:
+    """Take a folder out of the picked projects. False when it was not picked."""
+    cfg, was = load(), projects()
+    if project in was:
+        save({**cfg, "projects": {"include": [p for p in was if p != project]}})
+    return project in was
+
+
 def main(argv: list[str] | None = None) -> None:
-    """Print the model each stage will use."""
+    """Print the model each stage will use and the picked projects, after dropping any named."""
+    p = argparse.ArgumentParser(prog=f"{NAME} config", description=main.__doc__)
+    p.add_argument("--drop", metavar="DIR", action="append", default=[],
+                   help="Stop analysing this project (repeatable). Its findings stay in the database; the report hides them")
+    for d in p.parse_args(argv).drop:
+        d = os.path.abspath(os.path.expanduser(d))
+        print(f"dropped {d}" if drop(d) else f"{d} is not picked, so there is nothing to drop")
     print(f"{CONFIG_PATH}{'' if CONFIG_PATH.exists() else ' (not there; using defaults)'}")
     for stage in DEFAULTS:
         llm, model = choose(stage)
