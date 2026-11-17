@@ -1,8 +1,19 @@
 [project]
-name = "debrief"
+# "debrief" is taken on PyPI. The command and the import package are still `debrief`.
+name = "debrief-cli"
 version = "0.1.0"
 description = "Review your coding-agent sessions: what went wrong, and what to change."
+readme = "README.md"
 requires-python = ">=3.13"
+# No licence yet: the owner picks one. Add a LICENSE file and `license = "<SPDX id>"` here.
+keywords = ["coding-agent", "claude-code", "codex", "session-logs", "report"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "httpx>=0.28.1",
     "python-dotenv>=1.2.3",
@@ -20,6 +31,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["debrief"]
+
+# Keeps PLAN.md and uv.lock out. pyproject.toml, the readme and a root LICENSE* go in regardless.
+[tool.hatch.build.targets.sdist]
+include = ["/debrief", "/tests"]
 
 [tool.ruff]
 line-length = 120

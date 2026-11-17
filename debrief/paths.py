@@ -3,8 +3,13 @@
 import os
 from pathlib import Path
 
-HOME = Path(os.environ.get("DEBRIEF_HOME") or Path.home() / ".local" / "share" / "debrief")
-DB_PATH = Path(os.environ.get("DEBRIEF_DB") or HOME / "debrief.db")
+# The one name the program matches on or stores under: data folder, env var prefix, database
+# file, token header. Changing it strands existing users' data: see tests/test_paths.py.
+NAME = "debrief"
+TOKEN_HEADER = f"X-{NAME.title()}-Token"
+
+HOME = Path(os.environ.get(f"{NAME.upper()}_HOME") or Path.home() / ".local" / "share" / NAME)
+DB_PATH = Path(os.environ.get(f"{NAME.upper()}_DB") or HOME / f"{NAME}.db")
 RAW_DIR = HOME / "raw"          # one folder per session, as fetched or imported
 BUNDLE_DIR = HOME / "bundles"   # evidence bundles sent to the model
 SITE_OUT = HOME / "site"        # the built site: static files plus data/
