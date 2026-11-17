@@ -84,7 +84,7 @@ Rules:
   (e.g. "People paste review bot findings into the session by hand, across several sessions").
   Don't promise an outcome ("removes", "saves").
 - "target" starts with the project's name and a colon when the input names a project
-  ("canopy: CLAUDE.md", "canopy: .github/workflows/ci.yml"); no prefix when it does not.
+  ("myrepo: CLAUDE.md", "myrepo: .github/workflows/ci.yml"); no prefix when it does not.
 - effort: S (under an hour), M (a day or less), L (more).
 - Plain, short sentences. No hype. Do not invent facts that are not in the findings.
 
