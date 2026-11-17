@@ -19,7 +19,7 @@ from debrief import config
 
 MARK = "[redacted]"
 EMAIL_MARK = "[email]"
-VERSION = 1  # bump when a change to the patterns or scrub rules changes what comes out; uploads record it
+VERSION = 2  # bump when a change to the patterns or scrub rules changes what comes out; uploads record it
 
 # Redacting serialized JSON instead of each string misses a secret that follows an escape:
 # in "\nghp_..." the "n" of the escape is a word character, so \b never matches.
@@ -67,7 +67,10 @@ HOME_DASHED = re.sub(r"[^A-Za-z0-9]", "-", str(Path.home())) if Path.home().pare
 
 # An email address. Left alone: git@host, user@host:path (ssh, scp, git remotes), user@host inside a
 # URL, pkg@1.2.3 and @scope/pkg (the domain must start with a letter and end in a letter-only label).
-EMAIL = re.compile(r"(?<![\w.+/@:-])(?!git@)[A-Za-z0-9][\w.+-]*@[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b(?![:@\w]|\.[A-Za-z0-9-])")
+# An address right after a colon (mailto:a@b.com, "email":a@b.com) is one; scheme://user:pass@host is
+# safe only because the secret rules blank it first.
+# A colon after it marks user@host:path only when text follows at once ("sent to a@b.com: done" is prose).
+EMAIL = re.compile(r"(?<![\w.+/@-])(?!git@)[A-Za-z0-9][\w.+-]*@[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b(?![@\w]|:\S|\.[A-Za-z0-9-])")
 
 KNOWN_NAME = re.compile(r"(?i)KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL")
 KNOWN_MIN = 12  # a shorter value could blank ordinary words
