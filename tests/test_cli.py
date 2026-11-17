@@ -5,6 +5,8 @@ import http.client
 import http.server
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,7 +17,7 @@ import pytest
 
 from debrief import cli, config
 from debrief.cli import ReportHandler
-from debrief.paths import TOKEN_HEADER
+from debrief.paths import SITE_SRC, TOKEN_HEADER
 from debrief.runner import Runner, estimate_of, progress
 
 
@@ -358,3 +360,20 @@ def test_open_with_no_report_ingests_and_exports_only(tmp_path, monkeypatch):
     (tmp_path / "site" / "data" / "index.json").write_text("{}")
     cli.serve(["--no-browser", "--port", "0"])
     assert stages == []  # a home with a report starts at once
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_page_forgets_an_estimate_once_a_check_has_ended():
+    js = (SITE_SRC / "app.js").read_text()
+    fn = re.search(r"^function estimateAfter\(.*?^}$", js, re.MULTILINE | re.DOTALL)[0]
+    checks = """
+      const assert = require("node:assert"), est = { items: 12, after: "t1" }, gone = { outdated: true };
+      assert.equal(estimateAfter(null, { state: "done", ended: "t2" }), null);
+      assert.equal(estimateAfter(est, { state: "done", ended: "t1" }), est);     // the check it was made after
+      assert.equal(estimateAfter(est, { state: "running", ended: null }), est);  // a check that is still going
+      for (const state of ["done", "failed", "cancelled"]) assert.deepEqual(estimateAfter(est, { state, ended: "t2" }), gone);
+      const fresh = { items: 3, after: null };
+      assert.equal(estimateAfter(fresh, { state: "idle", ended: null }), fresh);  // no check yet
+      assert.equal(estimateAfter(fresh, { error: "" }), fresh);                   // the server did not answer
+    """
+    subprocess.run(["node", "-e", fn + checks], check=True)

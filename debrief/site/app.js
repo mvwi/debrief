@@ -1373,6 +1373,7 @@ function viewProjects() {
   const more = all.length - shown.length;
   const e = r.est;
   const estText = r.estimating ? "Estimating, about 20 seconds…" : !nPicked ? "" : !e ? "not estimated yet"
+    : e.outdated ? "the last check changed what is left to label, so refresh the estimate"
     : e.error ? `the estimate failed (${esc(e.error)})`
     : `${e.items ? `${plural(e.items, "new item")} to label` : "nothing new to label"}${!e.items || e.minutes == null ? "" : e.minutes ? ` · about ${fmt(e.minutes)} min` : " · under a minute"}${r.stale ? " · from before your last change" : ""}`;
   const model = (id) => { const x = s.stages[id]; return x ? `<code>${esc(x.model || x.defaults[x.llm])}</code>` : "the default model"; };
@@ -1428,12 +1429,19 @@ function togglePick(path, on) {
   redraw();
 }
 
+// An estimate counts what was unlabelled when it was made. A check that ended since (done, failed
+// or cancelled) has labelled some of that, so the numbers go. `after` is the `ended` of the last
+// check the estimate knew about.
+function estimateAfter(est, st) {
+  return est && st.state !== "running" && st.ended && st.ended !== est.after ? { outdated: true } : est;
+}
+
 async function estimate() {
   const r = state.run;
   r.estimating = true;
   redraw();
   const e = await settingsApi("POST", "api/estimate");
-  Object.assign(r, { estimating: false, stale: false, est: e.error == null ? e : { error: e.lines?.length ? e.lines.slice(-3).join(" / ") : e.error || GONE } });
+  Object.assign(r, { estimating: false, stale: false, est: { ...(e.error == null ? e : { error: e.lines?.length ? e.lines.slice(-3).join(" / ") : e.error || GONE }), after: r.status?.ended ?? null } });
   // The estimate read the logs again and rebuilt the pages.
   if (e.error == null) await load().catch(() => {});
   say(r.est.error ? "The estimate failed." : "Estimate ready.");
@@ -1446,6 +1454,7 @@ let runTimer;
 async function runSeen(st) {
   const r = state.run, was = r.status || {};
   r.status = st;
+  r.est = estimateAfter(r.est, st);
   clearTimeout(runTimer);
   if (st.state === "running") {
     runTimer = setTimeout(runPoll, 2000);

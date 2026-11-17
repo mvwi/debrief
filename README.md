@@ -56,7 +56,11 @@ You pick which projects get analysed. A project is the folder a session ran in. 
 Only picked projects are labeled, analysed and shown. Each gets its own findings and ideas,
 and an idea names the project it lands in (`myrepo: CLAUDE.md`). The picker in the report's
 side bar scopes every page to one project. Findings about how you prompt come from the picked
-projects together. To drop a project, remove it from `[projects] include` in config.toml.
+projects together. To drop a project:
+
+    debrief config --drop ~/Dev/myrepo     # its findings stay in the database, hidden
+
+Unticking it on the Projects page does the same.
 
 `debrief <stage> --help` runs one stage on its own: `ingest`, `label`, `synthesize`,
 `recommend`, `verify`, `export`, `prune`.
