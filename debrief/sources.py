@@ -47,6 +47,10 @@ HEADLESS_CLAUDE = {"sdk-cli"}
 SDK_MIN_TURNS = 2
 HEADLESS_CODEX = {"exec"}
 GITDIR = re.compile(r"gitdir: (.+?)/\.git/worktrees/")
+GITHUB_URL = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
+# The main repo root an earlier load recorded for a folder: git's own answer, kept for when the folder is gone.
+REMEMBERED = """SELECT s.cwd FROM source_logs l JOIN sessions s USING (session_id)
+    WHERE l.status = 'loaded' AND l.cwd = ? AND s.cwd != l.cwd LIMIT 1"""
 
 # The owner of an entry is the session the entry itself names (native), else the lowest
 # session ID: a rule that gives the same answer whatever order the logs load in.
@@ -90,8 +94,9 @@ def most_common(values: list) -> str | None:
 
 def facts(agent: str, entries: list[dict], stem: str) -> dict:
     """What the log says about its session: id, cwd, launcher (as logged; see is_headless),
-    model, title, tokens in and out."""
-    f = {"id": stem, "cwd": "", "launcher": "", "model": None, "title": None, "in": None, "out": None}
+    model, title, tokens in and out, and remote (the GitHub owner/name of its checkout; only
+    Codex logs record one)."""
+    f = {"id": stem, "cwd": "", "launcher": "", "model": None, "title": None, "in": None, "out": None, "remote": ""}
     if agent == "Claude Code":
         f["cwd"] = next((e["cwd"] for e in entries if e.get("cwd")), "")
         f["launcher"] = ",".join(sorted({str(e["entrypoint"]) for e in entries if e.get("entrypoint")}))
@@ -111,6 +116,9 @@ def facts(agent: str, entries: list[dict], stem: str) -> dict:
         meta = next((p for t, p in payloads if t == "session_meta"), {})
         f["id"], f["cwd"] = meta.get("id") or stem, meta.get("cwd") or ""
         f["launcher"] = f"{meta.get('originator') or ''}|{meta.get('source') or ''}"
+        git = meta.get("git") if isinstance(meta.get("git"), dict) else {}
+        url = GITHUB_URL.search(str(git.get("repository_url") or ""))
+        f["remote"] = url.group(1) if url else ""
         f["model"] = most_common([p["model"] for t, p in payloads if t == "turn_context" and p.get("model")])
         totals = [p["info"]["total_token_usage"] for t, p in payloads if p.get("type") == "token_count"
                   and isinstance(p.get("info"), dict) and isinstance(p["info"].get("total_token_usage"), dict)]
@@ -188,6 +196,11 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
     agent = agent or sniff(entries)
     f = facts(agent, entries, path.stem) if agent else {"id": None, "cwd": "", "launcher": ""}
     session_id, (checkout, repo) = f["id"], repo_roots(f["cwd"])
+    if repo and repo == f["cwd"] and not Path(repo, ".git").exists():
+        # Disk no longer says which repo this folder belongs to (a removed worktree). An earlier
+        # load of a session run there, or in a folder above it, may have: use its answer.
+        known = (conn.execute(REMEMBERED, (str(d),)).fetchone() for d in (Path(repo), *Path(repo).parents))
+        repo = next((r[0] for r in known if r), repo)
 
     def done(status: str, dropped: int = 0, human_turns: int | None = None) -> str:
         with conn:
@@ -230,7 +243,7 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
         unload(conn, session_id)  # it may hold rows from an earlier load
         return done("headless run" if prompts else "no human turn", human_turns=len(prompts))
     prompt = prompts[0]
-    f = facts(agent, kept, path.stem) | {"id": session_id, "cwd": f["cwd"], "launcher": f["launcher"]}
+    f = facts(agent, kept, path.stem) | {k: f[k] for k in ("cwd", "launcher", "remote")} | {"id": session_id}
     stamps = [e["timestamp"] for e in kept if isinstance(e.get("timestamp"), str)]
     lines = prompt.strip().splitlines()
     write_log(conn, (
@@ -238,6 +251,7 @@ def load_log(conn, path: Path, agent: str | None = None, project: str | None = N
         min(stamps, default=None), max(stamps, default=None), None, f["in"], f["out"], None, None, prompt, repo,
     ), log, root=checkout)
     with conn:
+        conn.execute("UPDATE sessions SET remote = ? WHERE session_id = ?", (f["remote"], session_id))
         conn.execute("UPDATE source_logs SET status = 'duplicate file' WHERE session_id = ? AND path != ?",
                      (session_id, str(path)))
     return done("loaded", len(foreign), len(prompts))
@@ -258,6 +272,8 @@ def sync(conn, claude_dir: Path | None = CLAUDE_DIR, codex_dir: Path | None = CO
     """Load every new or changed log. Returns a count of files per status."""
     cutoff = datetime.fromisoformat(since).timestamp() if since else 0
     known = {r["path"]: r for r in conn.execute("SELECT * FROM source_logs")}
+    # Codex sessions loaded before sessions.remote existed: read their logs once more to fill it.
+    no_remote = {r[0] for r in conn.execute("SELECT session_id FROM sessions WHERE agent = 'Codex' AND remote IS NULL")}
     counts: Counter = Counter()
     changed = False
     for path, agent in find_logs(claude_dir, codex_dir, list(import_dirs)):
@@ -270,7 +286,8 @@ def sync(conn, claude_dir: Path | None = CLAUDE_DIR, codex_dir: Path | None = CO
             # A row from before the launcher column existed says too little, and one read by an
             # older parser may hold rows the parser would no longer produce: read those logs once more.
             if old and old["launcher"] is not None and old["parser"] == PARSER_VERSION and (
-                    old["size"], old["mtime"]) == (stat.st_size, stat.st_mtime_ns):
+                    old["size"], old["mtime"]) == (stat.st_size, stat.st_mtime_ns) and not (
+                    old["status"] == "loaded" and old["session_id"] in no_remote):
                 # Unchanged, so not read; but the rule and flags apply afresh to what the row records.
                 headless = is_headless(old["agent"], old["launcher"], old["human_turns"], include_headless)
                 if old["status"] == "loaded" and headless:

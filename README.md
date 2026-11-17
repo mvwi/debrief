@@ -159,15 +159,19 @@ How they compare, measured on the prototype's data with no human-labeled set beh
 
 - A local session is linked to a pull request only when its log shows one: the URL that
   `gh pr create` printed, or a branch it pushed that is the head of a PR. On the author's
-  machine that linked 24 of the 41 sessions that pushed. A session that pushes straight to
-  main, or whose PR was opened by hand from a branch pushed outside the session, gets no CI
-  or review data.
+  machine that linked 33 of the 53 sessions that pushed. Of the 20 left out, 12 pushed
+  straight to main or another trunk branch.
+- A session that pushes straight to main gets no CI or review data, even when CI runs on
+  those commits. If you work alone and never open pull requests, the report will show no
+  CI for you. The same goes for a PR opened by hand from a branch pushed outside the session.
 - A CI failure counts for a session when its commit was made while the session ran (give or
   take ten minutes). Review comments count for every session linked to the PR.
 - Sessions fetched from Entire still need `debrief github --repo owner/name`; `sync` does not
   fetch their GitHub data.
 - A session's project is the folder it ran in, or the project of the repo it opened a PR in.
-  A session run in a worktree that ingest did not trace to its repo, and that opened no PR,
+  A session run in a git worktree joins its repo's project when ingest saw the worktree
+  while it still existed, or when the log names the repo, as Codex logs do. A Claude Code
+  session in a worktree that was deleted before the first ingest, and that opened no PR,
   shows up as a project of its own, named after the worktree folder.
 - A picked project that has not been synced yet shows in the report with no labels.
 - "How it works" describes the whole run; the project picker does not scope its numbers.
