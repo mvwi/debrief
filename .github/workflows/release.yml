@@ -98,10 +98,28 @@ jobs:
           path: tap
       - name: Point the formula at the new sdist
         run: |
+          version=${TAG#v}
           sdist=$(basename dist/*.tar.gz)
-          export URL="https://files.pythonhosted.org/packages/source/${DIST_NAME:0:1}/$DIST_NAME/$sdist"
-          SHA=$(sha256sum "dist/$sdist" | cut -d' ' -f1)
-          export SHA
+          built=$(sha256sum "dist/$sdist" | cut -d' ' -f1)
+          # PyPI can take a moment to list a new version: 30 tries, 10 s apart.
+          for try in $(seq 30); do
+            if json=$(curl -fsS "https://pypi.org/pypi/$DIST_NAME/$version/json"); then
+              break
+            fi
+            if [ "$try" = 30 ]; then
+              echo "::error::PyPI does not list $DIST_NAME $version"
+              exit 1
+            fi
+            sleep 10
+          done
+          # brew style wants the hashed url PyPI gives, not the /packages/source/ form.
+          URL=$(jq -er '.urls[] | select(.packagetype == "sdist") | .url' <<<"$json")
+          SHA=$(jq -er '.urls[] | select(.packagetype == "sdist") | .digests.sha256' <<<"$json")
+          if [ "$SHA" != "$built" ]; then
+            echo "::error::PyPI serves $sdist with sha256 $SHA; the file built here has $built"
+            exit 1
+          fi
+          export URL SHA
           cd tap
           # No /g: only the first url and the first sha256, which are the formula's own.
           # The resource blocks below them keep theirs.
@@ -114,5 +132,5 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "debrief ${TAG#v}"
+          git commit -am "debrief $version"
           git push
