@@ -25,7 +25,7 @@ wrong tool. To run debrief once without installing it:
 
 From source:
 
-    git clone https://github.com/OWNER/debrief && cd debrief
+    git clone https://github.com/mvwi/debrief && cd debrief
     uv tool install .
 
 The default labeler runs through `claude -p` on your Claude subscription, so it needs a
