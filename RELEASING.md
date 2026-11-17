@@ -3,7 +3,7 @@
 Pushing a `v*` tag runs `.github/workflows/release.yml`: it tests, builds, publishes to PyPI,
 creates the GitHub release and points the Homebrew formula at the new sdist.
 
-The repo is `OWNER/debrief` below; swap in the real owner. The tap is `mvwi/homebrew-tap`.
+The repo is `mvwi/debrief`. The tap is `mvwi/homebrew-tap`.
 
 ## One-time setup
 
@@ -13,7 +13,7 @@ The repo is `OWNER/debrief` below; swap in the real owner. The tap is `mvwi/home
    | Field | Value |
    |---|---|
    | PyPI project name | `debrief-cli` |
-   | Owner | `OWNER` |
+   | Owner | `mvwi` |
    | Repository name | `debrief` |
    | Workflow name | `release.yml` |
    | Environment name | `pypi` |
@@ -21,12 +21,12 @@ The repo is `OWNER/debrief` below; swap in the real owner. The tap is `mvwi/home
    A pending publisher does not hold the name. Someone else can still take `debrief-cli`
    until the first release lands.
 
-2. **GitHub environment.** In `OWNER/debrief`: Settings, Environments, new environment `pypi`.
+2. **GitHub environment.** In `mvwi/debrief`: Settings, Environments, new environment `pypi`.
    Optional: limit its deployment tags to `v*`.
 
 3. **Tap token.** Create a fine-grained personal access token (github.com, Settings,
    Developer settings): repository access "Only select repositories" with `mvwi/homebrew-tap`
-   alone, permission Contents: Read and write, nothing else. Save it in `OWNER/debrief` as the
+   alone, permission Contents: Read and write, nothing else. Save it in `mvwi/debrief` as the
    Actions secret `TAP_TOKEN`.
 
    The expiry defaults to 30 days. Pick a date you will remember or "No expiration"; when it
