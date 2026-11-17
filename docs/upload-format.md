@@ -21,10 +21,17 @@ Every file but the manifest is an *object*. An object is sent only when it chang
 Only projects the user picked (`[projects] include` in config.toml) contribute objects. The
 others are a count in the manifest: no name, no path, no sessions.
 
-Only the pusher's own sessions are sent. A session that names an author was fetched from
-Entire and may be a teammate's, and a server files every row under the signed-in user, so it
-is left out with the findings and ideas that cite it. Sessions read from local logs name no
-author and are taken as the pusher's.
+Only the pusher's own sessions are sent, since a server files every row under the signed-in
+user. Two kinds are left out, with the findings and ideas that cite them:
+
+- a session that names an author: it was fetched from Entire and may be a teammate's;
+- a session whose log was not read from the agents' own log folders on this machine
+  (`~/.claude/projects`, `~/.codex/sessions`). `--import DIR` takes any folder, and a
+  teammate's log names no author. This also leaves out your own logs brought over from another
+  machine, and logs read with `debrief ingest --claude-dir` or `--codex-dir` pointing
+  elsewhere: push those from the machine, or the folder, they were made in.
+
+The rule cannot see a log that someone copied into those two folders by hand.
 
 ### manifest.json
 
@@ -210,7 +217,8 @@ carry them.
 
 ## Left out, and why
 
-- **Other people's sessions**: any session that names an author.
+- **Other people's sessions**: any session that names an author, or whose log was read from
+  outside the agents' own log folders.
 - **A separate index of the per-session counts**, apart from the transcripts: the first server
   does not need one, and a later format can add it.
 

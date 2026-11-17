@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from debrief.sources import CLAUDE_DIR, CODEX_DIR
+
 TOKEN = "ghp_" + "A1b2C3d4E" * 4  # token-shaped; made up
 ALPHA, BETA, GAMMA = "/home/me/alpha", "/home/me/beta", "/home/me/acme-client"
 
@@ -22,6 +24,11 @@ def fill(conn) -> None:
         "VALUES (?, 'Claude Code', '2026-01-05T10:00:00Z', '2026-01-05T11:00:00Z', ?, ?, ?)",
         [("a1", ALPHA, f"deploy with {TOKEN}", "octo/alpha"), ("b1", BETA, "hello beta", ""),
          ("g1", GAMMA, "gamma secret plan", ""), ("../evil", ALPHA, "odd id", "")])
+    # Where each log was read from: the agents' own folders, as an ingest with no --import leaves it.
+    conn.executemany("INSERT INTO source_logs (path, session_id, status) VALUES (?, ?, 'loaded')",
+                     [(str(CLAUDE_DIR / "-home-me-alpha" / "a1.jsonl"), "a1"), (str(CODEX_DIR / "2026" / "b1.jsonl"), "b1"),
+                      (str(CLAUDE_DIR / "-home-me-acme-client" / "g1.jsonl"), "g1"),
+                      (str(CLAUDE_DIR / "-home-me-alpha" / "evil.jsonl"), "../evil")])
     conn.executemany(
         "INSERT INTO messages (session_id, idx, role, user_kind, ts, text) VALUES (?, ?, ?, ?, '2026-01-05T10:00:00Z', ?)",
         [("a1", 0, "user", "human", f"deploy with {TOKEN}"), ("a1", 1, "assistant", None, f"ran it\n{TOKEN}"),
@@ -244,3 +251,33 @@ def test_sessions_that_name_an_author_are_other_peoples_and_are_left_out(tmp_pat
     assert (alpha["sessions"], alpha["turns"]) == (2, 3)  # a1 and the odd-id session; not the teammate's
     assert "Left out 1 sessions: they are other people's" in got.stdout
     assert "Left out 1 findings and 2 ideas" in got.stdout
+
+
+def test_a_log_imported_from_another_folder_is_left_out(tmp_path):
+    def imported(conn):
+        # No author, as every log file loads; one read from a folder given to --import, one from a
+        # path that only looks as if it were under the Claude Code folder, one with no log on record.
+        for sid, word, path in (("i1", "pangolin", "/home/me/Downloads/logs/i1.jsonl"),
+                                ("i2", "axolotl", str(CLAUDE_DIR / ".." / ".." / "Downloads" / "i2.jsonl")),
+                                ("i3", "okapi", None)):
+            conn.execute("INSERT INTO sessions (session_id, agent, started_at, last_activity_at, cwd, prompt) "
+                         "VALUES (?, 'Claude Code', '2026-01-07T10:00:00Z', '2026-01-07T11:00:00Z', ?, ?)", (sid, ALPHA, word))
+            conn.execute("INSERT INTO messages (session_id, idx, role, user_kind, text) VALUES (?, 0, 'user', 'human', ?)",
+                         (sid, f"{word} plan"))
+            if path:
+                conn.execute("INSERT INTO source_logs (path, session_id, status) VALUES (?, ?, 'loaded')", (path, sid))
+        # A copy of a1's log sits in an imported folder too; the one that was loaded is the local one.
+        conn.execute("INSERT INTO source_logs (path, session_id, status) VALUES ('/home/me/Downloads/logs/a1.jsonl', 'a1', "
+                     "'duplicate file')")
+        conn.execute("INSERT INTO findings (finding_id, run_id, kind, title, detail, evidence, project) "
+                     "VALUES (10, 'r1', 'hotspot', 'Tapir spot', 'tapir-detail', ?, ?)",
+                     (json.dumps([{"session_id": "a1", "msg_idx": 2}, {"session_id": "i1", "msg_idx": 0}]), ALPHA))
+
+    got = push(tmp_path, "--dry-run", change=imported)
+    assert got.returncode == 0, got.stderr
+    manifest, data = read(tmp_path / "push")
+    for private in (b"pangolin", b"axolotl", b"okapi", b"i1", b"i2", b"i3", b"Tapir", b"tapir-detail"):
+        assert private not in data, private
+    assert "sessions/a1.json" in manifest["objects"] and len(manifest["objects"]) == 5
+    assert "Left out 3 sessions: they were imported from another folder." in got.stdout
+    assert "they are other people's" not in got.stdout

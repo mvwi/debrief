@@ -32,6 +32,7 @@ from debrief.export_site import (
     sessions_section,
 )
 from debrief.paths import HOME, NAME
+from debrief.sources import CLAUDE_DIR, CODEX_DIR
 from debrief.synthesize import ref_project
 
 FORMAT = 1
@@ -91,7 +92,13 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
     every, _ = sessions_section(conn, labels, "", picked)
     # A session with an author came from Entire and may be a teammate's; a server would file it
     # under whoever pushed. Local logs name no author.
-    sessions = [s for s in every if not s["author"]]
+    mine = [s for s in every if not s["author"]]
+    # Nor is a log read from anywhere but the agents' own log folders on this machine: `--import`
+    # takes any folder, and a teammate's log names no author. The loaded row is the file the
+    # session's rows were read from.
+    local = {sid for sid, path in conn.execute("SELECT session_id, path FROM source_logs WHERE status = 'loaded'")
+             if ".." not in Path(path).parts and any(Path(path).is_relative_to(root) for root in (CLAUDE_DIR, CODEX_DIR))}
+    sessions = [s for s in mine if s["id"] in local]
     for s in sessions:
         raw[object_path(s["id"])] = {**s, "project": key[s["project"]], **session_file(conn, labels, s["id"])}
     ids = {s["id"] for s in sessions}
@@ -99,7 +106,7 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
     findings, recs, refs = findings_and_recs(conn, labels, run_id, picked)
     found, ideas = len(findings), len(recs)
     findings, recs, refs = only_picked(conn, findings, recs, refs, key, ids)
-    left_out = {"findings": found - len(findings), "ideas": ideas - len(recs), "sessions": len(every) - len(sessions)}
+    left_out = {"findings": found - len(findings), "ideas": ideas - len(recs), "authored": len(every) - len(mine), "imported": len(mine) - len(sessions)}
     if findings or recs:
         for item in (*findings.values(), *recs):
             item["project"] = item["project"] and key[item["project"]]
@@ -224,8 +231,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  This push removes {gone} session{'' if gone == 1 else 's'} the server holds "
               f"({len(stats['removed'])} object{'' if len(stats['removed']) == 1 else 's'} no longer in a picked project).")
     out = stats["left_out"]
-    if out["sessions"]:
-        print(f"  Left out {out['sessions']} sessions: they are other people's (they name an author).")
+    if out["authored"]:
+        print(f"  Left out {out['authored']} sessions: they are other people's (they name an author).")
+    if out["imported"]:
+        print(f"  Left out {out['imported']} sessions: they were imported from another folder.")
     if out["findings"] or out["ideas"]:
         print(f"  Left out {out['findings']} findings and {out['ideas']} ideas: "
               "they draw on projects you have not picked or on sessions that are not sent.")
