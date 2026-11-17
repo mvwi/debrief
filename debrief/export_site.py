@@ -587,6 +587,14 @@ def repo_of(prs: dict) -> str | None:
     return repos.pop() if len(repos) == 1 else None
 
 
+def copy_static(out: Path) -> None:
+    """Put the page's own files (HTML, CSS, JS) in the site folder."""
+    out.mkdir(parents=True, exist_ok=True)
+    for static in SITE_SRC.iterdir():
+        if static.is_file():
+            shutil.copy(static, out / static.name)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", help="Findings run_id (default: latest with recommendations)")
@@ -631,10 +639,7 @@ def main(argv: list[str] | None = None) -> None:
         "ci": ci, "reviews": [r for r in review_section(conn) if r["pr"] in linked], "prs": prs,
         "skills": skills_section(conn, set(authors)),
     }
-    SITE_OUT.mkdir(parents=True, exist_ok=True)
-    for static in SITE_SRC.iterdir():
-        if static.is_file():
-            shutil.copy(static, SITE_OUT / static.name)
+    copy_static(SITE_OUT)
     out = SITE_OUT / "data"
     shard_dir = out / "sessions"
     shard_dir.mkdir(parents=True, exist_ok=True)
