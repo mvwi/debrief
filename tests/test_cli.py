@@ -15,6 +15,7 @@ import pytest
 
 from debrief import cli, config
 from debrief.cli import ReportHandler
+from debrief.paths import TOKEN_HEADER
 from debrief.runner import Runner, estimate_of, progress
 
 
@@ -41,7 +42,7 @@ def test_host_header(tmp_path):
 
 
 FAKE_KEY = "sk-or-v1-" + "0" * 28 + "a1b2"
-TOKEN = {"X-Debrief-Token": ReportHandler.token}
+TOKEN = {TOKEN_HEADER: ReportHandler.token}
 JSON = {"Content-Type": "application/json"} | TOKEN
 GOOD = {"stages": {"label": {"llm": "openrouter", "model": "typesafe/jev-1.13"}}, "github": False}
 
@@ -136,8 +137,8 @@ def test_key_goes_in_and_never_comes_out(api):
     ("DELETE", "/api/key", None, JSON | {"Host": "evil.example"}, 403),
     ("POST", "/api/settings", GOOD, JSON | {"Origin": "http://evil.example"}, 403),
     ("POST", "/api/settings", GOOD, {"Content-Type": "application/json"}, 403),  # no token
-    ("POST", "/api/key", {"key": FAKE_KEY}, JSON | {"X-Debrief-Token": "wrong"}, 403),
-    ("DELETE", "/api/key", None, JSON | {"X-Debrief-Token": "caf\u00e9"}, 403),
+    ("POST", "/api/key", {"key": FAKE_KEY}, JSON | {TOKEN_HEADER: "wrong"}, 403),
+    ("DELETE", "/api/key", None, JSON | {TOKEN_HEADER: "caf\u00e9"}, 403),
     ("POST", "/api/key", {"key": FAKE_KEY}, JSON | {"Origin": "null"}, 403),
     ("DELETE", "/api/key", None, JSON | {"Origin": "http://evil.example"}, 403),
     ("POST", "/api/settings", GOOD, JSON | {"Content-Type": "text/plain"}, 415),
@@ -266,7 +267,7 @@ def test_estimate_runs_the_dry_run_then_export(api):
     (method, path, headers, want)
     for method, path in (("POST", "/api/run"), ("DELETE", "/api/run"), ("POST", "/api/estimate"))
     for headers, want in ((JSON | {"Host": "evil.example"}, 403), ({"Content-Type": "application/json"}, 403),
-                          (JSON | {"X-Debrief-Token": "wrong"}, 403), (JSON | {"Origin": "http://evil.example"}, 403),
+                          (JSON | {TOKEN_HEADER: "wrong"}, 403), (JSON | {"Origin": "http://evil.example"}, 403),
                           (TOKEN, 415), (JSON | {"Content-Length": "140000"}, 413))
 ] + [("GET", "/api/run", {"Host": "evil.example"}, 403), ("PUT", "/api/run", JSON, 501),
      ("GET", "/api/estimate", {}, 404)])
@@ -331,7 +332,7 @@ def test_stopping_the_server_stops_the_run(tmp_path, sig):
         token, url = server.stdout.readline().strip(), server.stdout.readline().split()[3]
         port = int(url.split(":")[2].split("/")[0])
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        conn.request("POST", "/api/run", headers={"Content-Type": "application/json", "X-Debrief-Token": token})
+        conn.request("POST", "/api/run", headers={"Content-Type": "application/json", TOKEN_HEADER: token})
         assert conn.getresponse().status == 200
         child = int(until(lambda: (tmp_path / "run.pid").exists() and (tmp_path / "run.pid").read_text()))
         assert alive(child)

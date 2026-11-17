@@ -26,7 +26,7 @@ import sys
 import webbrowser
 
 from debrief import config
-from debrief.paths import HOME, SITE_OUT
+from debrief.paths import HOME, SITE_OUT, TOKEN_HEADER
 from debrief.runner import Runner
 
 # Stage name -> module. Each module has main(argv).
@@ -47,7 +47,7 @@ STAGES = {
 
 def stage(name: str, argv: list[str]) -> None:
     print(f"\n== {name} {' '.join(argv)}".rstrip(), flush=True)
-    importlib.import_module(f"debrief.{STAGES[name]}").main(argv)
+    importlib.import_module(f"{__package__}.{STAGES[name]}").main(argv)
 
 
 def sync(argv: list[str]) -> None:
@@ -165,7 +165,7 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
             return
         self.close_connection = True  # a refused body is never read, so the connection cannot be reused
         length = self.headers.get("Content-Length", "0")
-        if not hmac.compare_digest(self.headers.get("X-Debrief-Token", "").encode(), self.token.encode()):
+        if not hmac.compare_digest(self.headers.get(TOKEN_HEADER, "").encode(), self.token.encode()):
             return self.reply(403, {"error": "to change settings, open the link `debrief open` printed"})
         if self.headers.get("Origin") not in (None, *(f"http://{h}" for h in self.hosts())):
             return self.reply(403, {"error": "wrong origin"})
@@ -248,7 +248,7 @@ def serve(argv: list[str]) -> None:
         # In child processes, as every later run is: a stage run here would keep its database
         # connection open for as long as the server lives, and its lock would fail those runs.
         for name in ("ingest", "export"):
-            subprocess.run([sys.executable, "-m", "debrief.cli", name], check=True)
+            subprocess.run([sys.executable, "-m", f"{__package__}.cli", name], check=True)
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # `kill` stops a run too, as Ctrl-C does
     url = f"http://127.0.0.1:{server.server_port}/"
     url += f"?t={ReportHandler.token}"  # the page keeps the token for this tab and drops it from the address
@@ -280,7 +280,7 @@ def main(argv: list[str] | None = None) -> None:
     if name in commands:
         commands[name](rest)
     elif name in STAGES:
-        importlib.import_module(f"debrief.{STAGES[name]}").main(rest)
+        importlib.import_module(f"{__package__}.{STAGES[name]}").main(rest)
     else:
         sys.exit(f"debrief: unknown command {name!r}. Try `debrief --help`.")
 

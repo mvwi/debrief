@@ -18,8 +18,8 @@ from pathlib import Path
 from debrief import config
 from debrief.paths import HOME
 
-SYNC = [sys.executable, "-u", "-m", "debrief.cli", "sync"]  # -u: a pipe would hold prints back
-EXPORT = [sys.executable, "-m", "debrief.cli", "export"]
+SYNC = [sys.executable, "-u", "-m", f"{__package__}.cli", "sync"]  # -u: a pipe would hold prints back
+EXPORT = [sys.executable, "-m", f"{__package__}.cli", "export"]
 # Only the lines `sync` prints: synthesize has "== <project>: ..." headings of its own.
 STAGE = re.compile(r"== (ingest|github|label|synthesize|recommend|export)(?: |$)")
 COUNT = re.compile(r"\s*(\d+)/(\d+) done")

@@ -152,7 +152,9 @@ const NO_PROJECT = "(no project)";
 const pathTail = (p, n = 1) => String(p).replace(/[\\/]+$/, "").split(/[\\/]/).slice(-n).join("/") || p;
 const projectName = (p) => (p ? state.projects.find((x) => x[0] === p)?.[1] || pathTail(p) : "Unknown");
 // The side bar's picker sets state.scope.project, which scopes every page.
-const PROJECT_KEY = "debrief.project";
+// The one name the page stores under and sends: storage keys and the token header (paths.py has its twin).
+const APP = "debrief";
+const PROJECT_KEY = `${APP}.project`;
 const inProject = (s, p = state.scope.project) => !p || (p === NO_PROJECT ? !s.project : s.project === p);
 const allSessions = () => state.data.sessions.filter((s) => inProject(s));
 // An idea is about one project, or spans them (project null: prompting habits, and runs from before
@@ -1285,11 +1287,12 @@ const LLM_NAMES = { "claude-code": "Claude Code", openrouter: "OpenRouter" };
 
 // Only `debrief open` has this API. Anything else answers with a 404 page or not at all: { error }.
 // `debrief open` puts a token for this run in the link it opens; writes are refused without it.
+const TOKEN_KEY = `${APP}-token`;
 const TOKEN = (() => {
   const url = new URL(location.href), t = url.searchParams.get("t");
   try {
-    if (t) { sessionStorage.setItem("debrief-token", t); url.searchParams.delete("t"); history.replaceState(null, "", url); }
-    return sessionStorage.getItem("debrief-token") || "";
+    if (t) { sessionStorage.setItem(TOKEN_KEY, t); url.searchParams.delete("t"); history.replaceState(null, "", url); }
+    return sessionStorage.getItem(TOKEN_KEY) || "";
   } catch {
     return t || "";
   }
@@ -1297,7 +1300,7 @@ const TOKEN = (() => {
 
 async function settingsApi(method, path, body) {
   try {
-    const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-Debrief-Token": TOKEN }, body: body && JSON.stringify(body) });
+    const r = await fetch(path, { method, headers: { "Content-Type": "application/json", [`X-${APP}-Token`]: TOKEN }, body: body && JSON.stringify(body) });
     const out = await r.json();
     return r.ok ? out : { ...out, error: out.error || `HTTP ${r.status}` };
   } catch {
