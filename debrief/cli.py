@@ -6,6 +6,7 @@
     debrief sync --dry-run       ingest, then say what labeling would cost; no model calls
     debrief open                 serve the report on localhost and open it in the browser;
                                  the page can also start a sync, show its progress and stop it
+    debrief push --dry-run       build what an upload to a team server would hold; sends nothing
     debrief <stage> [args]       run one stage; `debrief <stage> --help` lists its flags
 
 Everything is kept under DEBRIEF_HOME (default ~/.local/share/debrief).
@@ -43,6 +44,7 @@ STAGES = {
     "github": "github",
     "prune": "prune",
     "config": "config",
+    "push": "push",
 }
 
 

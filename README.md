@@ -37,6 +37,7 @@ logged-in `claude` CLI. Without one, pick OpenRouter and save a key on the Setti
     debrief sync --dry-run     # ingest logs, then say how many model calls labeling would take
     debrief sync               # ingest, label, find patterns, build the report
     debrief open               # serve the report at http://127.0.0.1:8765 and open it
+    debrief push --dry-run     # write what an upload to a team server would hold; sends nothing
 
 Useful flags for `sync`:
 
@@ -83,6 +84,11 @@ Unticking it on the Projects page does the same.
   logged-in `gh` CLI and read-only. It sends repo names, PR numbers, branch names and commit
   SHAs, and nothing from your transcripts. `--no-github`, or `[github] enabled = false` in
   config.toml, turns it off; without `gh` it is skipped.
+- `debrief push --dry-run` writes a folder (`~/.local/share/debrief/push`, or `--out DIR`) that
+  holds transcript text from your picked projects, and sends nothing. No upload exists yet:
+  `debrief push` without `--dry-run` refuses. [docs/upload-format.md](docs/upload-format.md)
+  says what the folder holds. Upload only what you have the right to share: transcripts hold
+  your employer's or clients' code and other people's names.
 - The report holds your transcripts. `debrief open` serves it on 127.0.0.1 only.
 - Secrets are replaced with `[redacted]` in the report and in anything debrief uploads. The text
   sent to the model for labeling and synthesis is not redacted. Three things are caught: known
