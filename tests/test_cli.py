@@ -359,7 +359,10 @@ def test_open_with_no_report_ingests_and_exports_only(tmp_path, monkeypatch):
     (tmp_path / "site" / "data").mkdir(parents=True)
     (tmp_path / "site" / "data" / "index.json").write_text("{}")
     cli.serve(["--no-browser", "--port", "0"])
+    (tmp_path / "site" / "app.js").write_text("// from an older version")
+    cli.serve(["--no-browser", "--port", "0"])
     assert stages == []  # a home with a report starts at once
+    assert (tmp_path / "site" / "app.js").read_text() == (SITE_SRC / "app.js").read_text()  # an upgrade reaches the page
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")

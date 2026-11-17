@@ -251,6 +251,10 @@ def serve(argv: list[str]) -> None:
         # connection open for as long as the server lives, and its lock would fail those runs.
         for name in ("ingest", "export"):
             subprocess.run([sys.executable, "-m", f"{__package__}.cli", name], check=True)
+    else:
+        # The report keeps a copy of the page from its last build; after an upgrade that copy is old.
+        from debrief.export_site import copy_static
+        copy_static(SITE_OUT)
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # `kill` stops a run too, as Ctrl-C does
     url = f"http://127.0.0.1:{server.server_port}/"
     url += f"?t={ReportHandler.token}"  # the page keeps the token for this tab and drops it from the address
