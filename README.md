@@ -93,7 +93,9 @@ Unticking it on the Projects page does the same.
   whose names contain KEY, TOKEN, SECRET, PASSWORD or CREDENTIAL. It is pattern matching, not a
   guarantee. It misses a secret with no known shape and no telling name beside it: a password
   in a sentence, a token in a URL parameter called `t`, a short password. It does not remove
-  email addresses, IP addresses, host names or people's names. Read before you share.
+  IP addresses, host names or people's names; uploads replace email addresses and your home
+  folder path, the report does not. Findings and ideas are text a model wrote, and nothing
+  checks that text for the names of projects you did not pick. Read before you share.
 
 ## Which labeler
 

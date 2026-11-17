@@ -2,7 +2,7 @@
 
     redact(text)      one string
     redact_tree(obj)  nested JSON-like data
-    scrub(obj, home_paths=False)  either, plus counts; for callers that upload
+    scrub(obj, home_paths=False, emails=False)  either, plus counts; for callers that upload
 
 Three kinds of rule, in the order they run: exact values this machine already knows (debrief's
 saved OpenRouter key and secret-named environment variables), known token shapes (SECRETS),
@@ -18,6 +18,8 @@ from pathlib import Path
 from debrief import config
 
 MARK = "[redacted]"
+EMAIL_MARK = "[email]"
+VERSION = 1  # bump when a change to the patterns or scrub rules changes what comes out; uploads record it
 
 # Redacting serialized JSON instead of each string misses a secret that follows an escape:
 # in "\nghp_..." the "n" of the escape is a word character, so \b never matches.
@@ -62,6 +64,10 @@ HOME = re.compile(r"(?<![\w.~-])(?:/(?:Users|home)/|[A-Za-z]:\\{1,2}Users\\{1,2}
 # Claude Code names a project's log folder after its path, every other character a dash: -Users-name-Dev-x.
 # Only for a home under /Users or /home: the dashed form of / or /root would match ordinary text.
 HOME_DASHED = re.sub(r"[^A-Za-z0-9]", "-", str(Path.home())) if Path.home().parent.name in ("Users", "home") else None
+
+# An email address. Left alone: git@host, user@host:path (ssh, scp, git remotes), user@host inside a
+# URL, pkg@1.2.3 and @scope/pkg (the domain must start with a letter and end in a letter-only label).
+EMAIL = re.compile(r"(?<![\w.+/@:-])(?!git@)[A-Za-z0-9][\w.+-]*@[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b(?![:@\w]|\.[A-Za-z0-9-])")
 
 KNOWN_NAME = re.compile(r"(?i)KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL")
 KNOWN_MIN = 12  # a shorter value could blank ordinary words
@@ -138,14 +144,15 @@ def redact_damaged(text: str) -> str:
     return clean(DAMAGED_RUN.sub(blank, text))[0]
 
 
-def scrub(obj, *, home_paths: bool = False):
-    """Return (scrubbed copy, {"secrets": n, "home_paths": n}) for a string or JSON-like data.
+def scrub(obj, *, home_paths: bool = False, emails: bool = False):
+    """Return (scrubbed copy, {"secrets": n, "home_paths": n, "emails": n}) for a string or JSON-like data.
 
     Every string is redacted, dict keys included, and U+FFFD is dropped (the artifact host
     rejects it). With home_paths, /Users/<name>, /home/<name> and C:\\Users\\<name> become ~,
-    and so does this user's home folder in Claude's dashed form (-Users-<name>).
+    and so does this user's home folder in Claude's dashed form (-Users-<name>). With emails,
+    each email address becomes [email]; GitHub logins, @mentions and owner/name stay.
     """
-    counts = {"secrets": 0, "home_paths": 0}
+    counts = {"secrets": 0, "home_paths": 0, "emails": 0}
 
     def walk(o):
         if isinstance(o, str):
@@ -162,6 +169,9 @@ def scrub(obj, *, home_paths: bool = False):
                 if HOME_DASHED:
                     counts["home_paths"] += text.count(HOME_DASHED)
                     text = text.replace(HOME_DASHED, "~")
+            if emails:
+                text, n = EMAIL.subn(EMAIL_MARK, text)
+                counts["emails"] += n
             return text
         if isinstance(o, (list, tuple)):
             return [walk(v) for v in o]

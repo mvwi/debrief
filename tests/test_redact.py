@@ -196,8 +196,31 @@ def test_scrub_counts_and_home_paths(monkeypatch):
     assert out == {"t": ["cd ~/Dev/x && cat ~/work/a.txt", "[redacted] and [redacted]"],
                    "w": ["~\\repo", "projects/~-Dev-x/a.jsonl"],
                    "url": "https://example.com/home/page and src/Users/list.ts", "n": 3}
-    assert counts == {"secrets": 2, "home_paths": 4}
+    assert counts == {"secrets": 2, "home_paths": 4, "emails": 0}
     assert data["t"][1] == GH + " and " + GH   # the input is not changed
     kept, counts = scrub(data)
-    assert kept["t"][0] == data["t"][0] and counts == {"secrets": 2, "home_paths": 0}
+    assert kept["t"][0] == data["t"][0] and counts == {"secrets": 2, "home_paths": 0, "emails": 0}
     assert scrub("x\ufffd" + GH)[1]["secrets"] == 1
+
+
+NOT_EMAILS = [
+    "git remote add origin git@github.com:owner/name.git", "ssh -T git@github.com", "scp deploy@build.example.net:/srv/app .",
+    "https://deploy@build.example.net/x", "npm i @scope/pkg@1.2.3 react@19.3.1 next@16.4.4-canary.rc", "pnpm@12.15.0",
+    "@app.route('/x')", "@dataclass", "thanks @octocat, see owner/name#12", "icons/logo@2x.png", "python@3.14",
+    "charm.land/lipgloss/v2@v2.0.6", "psql postgresql://postgres@127.0.0.1:5432/db", "WEB @type:session -@session.initial_view.name:/x",
+]
+
+
+def test_emails():
+    from debrief.redact import scrub
+    text = 'to: ["jane.doe+work@example.co.uk"], cc <bob@example.com>; author 12345+octocat@users.noreply.github.com'
+    out, counts = scrub(text, emails=True)
+    assert out == 'to: ["[email]"], cc <[email]>; author [email]' and counts["emails"] == 3
+    assert scrub(text)[0] == text and redact(text) == text   # off by default, and never in the local report
+    for kept in NOT_EMAILS:
+        assert scrub(kept, emails=True) == (kept, {"secrets": 0, "home_paths": 0, "emails": 0}), kept
+
+
+def test_version():
+    from debrief.redact import VERSION
+    assert VERSION == 1
