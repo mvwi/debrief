@@ -39,7 +39,7 @@ The rule cannot see a log that someone copied into those two folders by hand.
      "format": 1,
      "tool": "debrief 0.1.1",
      "machine": "0b9c4c0e-3f0a-4d0e-9d55-6a1f4b6f1f0a",
-     "redaction": 3,
+     "redaction": 1,
      "projects": [
       {"key": "octo/alpha", "name": "alpha", "sessions": 12, "turns": 140, "analysed_at": "2026-01-05T11:00:00Z"},
       {"key": "local:5f2a90c1d3e4", "name": "beta", "sessions": 3, "turns": 20, "analysed_at": null}
@@ -59,7 +59,7 @@ The rule cannot see a log that someone copied into those two folders by hand.
 - `machine`: see "Who and where".
 - `redaction`: the version of the redaction rules every object in `objects` was scrubbed under,
   an integer that grows when the rules change. A server can keep it beside each object it
-  stores. It is 0 until the redaction module carries a version.
+  stores. It is `VERSION` in `debrief/redact.py`.
 - `projects`: the picked projects that have sessions. `sessions` and `turns` count what is sent;
   `turns` are the person's own turns.
 - `unpicked`: how many other projects debrief found on the machine.
@@ -201,10 +201,11 @@ change in a linked PR's state.
 
 ## Redaction
 
-Every object, and the manifest's project list, goes through one function before it is hashed or
-written. It replaces secret-shaped strings (GitHub, Anthropic, OpenAI, AWS, Slack, Stripe and
-Google tokens, JWTs, private keys, bearer tokens, passwords in URLs) with `[redacted]`. It
-works on patterns, so it misses a secret with no known shape.
+Every object, and the manifest's project list, goes through one function, `scrub` in
+`debrief/redact.py`, before it is hashed or written. It replaces secrets with `[redacted]`:
+known token shapes, values given to a secret-sounding name (`API_KEY=`, `--token`), and the
+exact values of secrets the machine already knows. The README lists them. It works on
+patterns, so it misses a secret with no known shape and no telling name beside it.
 
 The same function shortens home-folder paths in text (`/Users/<name>`, `/home/<name>`,
 `C:\Users\<name>`) to `~`, so a transcript does not carry the user's login name that way.

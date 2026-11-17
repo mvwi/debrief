@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from debrief.redact import VERSION
 from debrief.sources import CLAUDE_DIR, CODEX_DIR
 
 TOKEN = "ghp_" + "A1b2C3d4E" * 4  # token-shaped; made up
@@ -31,7 +32,7 @@ def fill(conn) -> None:
                       (str(CLAUDE_DIR / "-home-me-alpha" / "evil.jsonl"), "../evil")])
     conn.executemany(
         "INSERT INTO messages (session_id, idx, role, user_kind, ts, text) VALUES (?, ?, ?, ?, '2026-01-05T10:00:00Z', ?)",
-        [("a1", 0, "user", "human", f"deploy with {TOKEN}"), ("a1", 1, "assistant", None, f"ran it\n{TOKEN}"),
+        [("a1", 0, "user", "human", f"deploy with {TOKEN}"), ("a1", 1, "assistant", None, f"ran it\n{TOKEN} in /Users/sam/Dev/x, ask sam@corp.example"),
          ("a1", 2, "user", "human", "no, that is wrong"), ("b1", 0, "user", "human", "hello beta"),
          ("g1", 0, "user", "human", "gamma secret plan"), ("../evil", 0, "user", "human", "odd id")])
     conn.execute("INSERT INTO tool_calls (session_id, msg_idx, call_idx, name, input, output, is_error, files, writes) "
@@ -111,6 +112,9 @@ def test_bundle_holds_picked_projects_only_and_no_planted_token(tmp_path):
 
     assert TOKEN.encode() not in data and b"A1b2C3d4E" not in data
     assert b"[redacted]" in data
+    # The home folder and the address in a transcript go too; what is left says where, not whose.
+    assert b"/Users/sam" not in data and b"sam@corp.example" not in data
+    assert b"in ~/Dev/x, ask [email]" in data
     # The unpicked project: not its name, its session, its text, its label or its finding.
     for private in (b"acme", b"g1", b"gamma", b"Gamma", b"Lemur"):
         assert private not in data
@@ -119,7 +123,7 @@ def test_bundle_holds_picked_projects_only_and_no_planted_token(tmp_path):
     assert "/home/me" not in json.dumps(manifest)
     keys = {p["name"]: p["key"] for p in manifest["projects"]}
     assert keys["alpha"] == "octo/alpha" and keys["beta"].startswith("local:")
-    assert manifest["redaction"] == 0 and "Left out 0 findings and 1 ideas" in got.stdout
+    assert manifest["redaction"] == VERSION and "Left out 0 findings and 1 ideas" in got.stdout
     assert manifest["format"] == 1 and manifest["machine"] == (tmp_path / "machine_id").read_text()
 
     # Every object is listed with the hash and size of the file that was written.
@@ -144,7 +148,8 @@ def test_bundle_holds_picked_projects_only_and_no_planted_token(tmp_path):
                  "Made an id for this machine"):
         assert line in got.stdout, line
     assert int(got.stdout.split("redactions  ")[1].split()[0]) >= 7 and "home-folder paths shortened to ~" in got.stdout
-    assert "email addresses replaced" in got.stdout and "Upload only what you have the right to share" in got.stdout
+    # Two of each: the agent message in the transcript, and again as the text before a cited turn.
+    assert "2 email addresses replaced, 2 home-folder paths shortened to ~" in got.stdout and "Upload only what you have the right to share" in got.stdout
     assert str(len(data)) in got.stdout.replace(",", "")
 
 

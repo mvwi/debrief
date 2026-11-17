@@ -17,7 +17,6 @@ import uuid
 from collections import Counter
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
 
 from debrief import config
 from debrief.db import connect, repo_projects, session_projects
@@ -32,27 +31,16 @@ from debrief.export_site import (
     sessions_section,
 )
 from debrief.paths import HOME, NAME
+from debrief.redact import VERSION, scrub
 from debrief.sources import CLAUDE_DIR, CODEX_DIR
 from debrief.synthesize import ref_project
 
 FORMAT = 1
-REDACTION = 0  # shortcut: becomes debrief.redact.VERSION with the swap described at scrub()
 MACHINE_PATH = HOME / "machine_id"
 DEFAULT_OUT = HOME / "push"
 SAFE_NAME = re.compile(r"[A-Za-z0-9_-][\w.-]*", re.ASCII)  # a session id that can be a file name as it is
 NO_SERVER = (f"{NAME}: there is no server to push to yet. "
              f"`{NAME} push --dry-run` builds what would be sent and sends nothing.")
-
-
-def scrub(obj, *, home_paths: bool = False, emails: bool = False) -> tuple[Any, dict[str, int]]:
-    """(scrubbed copy, {"secrets": n, "home_paths": n, "emails": n}). The one door to redaction."""
-    # shortcut: stands in for debrief.redact.scrub, which has this signature; replace this function
-    # with `from debrief.redact import scrub` when that module lands. Until then home paths and
-    # email addresses are left as they are, and secrets are counted by the marker, so text that already said "[redacted]" hides a hit.
-    from debrief.export_site import redact_tree
-    out = redact_tree(obj)
-    marks = [json.dumps(x, ensure_ascii=False).count("[redacted]") for x in (out, obj)]
-    return out, {"secrets": max(marks[0] - marks[1], 0), "home_paths": 0, "emails": 0}
 
 
 def machine_id() -> tuple[str, bool]:
@@ -140,7 +128,7 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
                           "analysed_at": r["analysed_at"]} for r in rows if r["picked"]], home_paths=True, emails=True)
     counts.update(n)
     manifest = {"format": FORMAT, "tool": f"{NAME} {version('debrief-cli')}", "machine": machine,
-                "redaction": REDACTION,
+                "redaction": VERSION,
                 "projects": projects, "unpicked": sum(not r["picked"] for r in rows),
                 "objects": objects, "sent": sorted(send)}
     stats = {
