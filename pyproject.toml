@@ -37,7 +37,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["debrief"]
 
-# Keeps PLAN.md and uv.lock out. pyproject.toml, the readme and a root LICENSE* go in regardless.
+# Keeps uv.lock out. pyproject.toml, the readme and a root LICENSE* go in regardless.
 [tool.hatch.build.targets.sdist]
 include = ["/debrief", "/tests"]
 
