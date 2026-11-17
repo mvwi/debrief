@@ -39,7 +39,9 @@ The repo is `mvwi/debrief`. The tap is `mvwi/homebrew-tap`.
 
 ## Each release
 
-1. Set `version` in `pyproject.toml`, run `uv lock`, commit, push to `main`. Wait for CI.
+1. `main` only changes through pull requests (a repository rule refuses direct pushes). On a
+   branch, set `version` in `pyproject.toml`, run `uv lock`, commit, open a pull request and
+   merge it once CI passes. Then `git switch main && git pull`.
 2. Tag and push:
 
        git tag v0.2.0
