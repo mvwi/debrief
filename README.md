@@ -8,11 +8,29 @@ of your turns, groups the labels into findings with evidence, and builds a local
 
 ## Install
 
-    git clone <repo> && cd debrief
+With Homebrew on a Mac:
+
+    brew install mvwi/tap/debrief
+
+With uv or pipx, on Python 3.13 or newer:
+
+    uv tool install debrief-cli
+    pipx install debrief-cli
+
+The package on PyPI is `debrief-cli`; the command it installs is `debrief`. The PyPI package
+named `debrief` is a different project, so `uvx debrief` and `pip install debrief` fetch the
+wrong tool. To run debrief once without installing it:
+
+    uvx --from debrief-cli debrief open
+
+From source:
+
+    git clone https://github.com/mvwi/debrief && cd debrief
     uv tool install .
 
-Needs Python 3.13 and a logged-in `claude` CLI (the default labeler runs through `claude -p` on
-your Claude subscription).
+The default labeler runs through `claude -p` on your Claude subscription, so it needs a
+logged-in `claude` CLI. Without one, pick OpenRouter and save a key on the Settings page of
+`debrief open`. `gh` is optional: with it, `debrief sync` adds pull-request data.
 
 ## Use
 
