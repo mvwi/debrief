@@ -454,4 +454,24 @@ describe("quota", () => {
 		expect([short.status, short.json.error.code]).toEqual([422, "hash_mismatch"])
 		expect(await snapshotRows(u.id)).toEqual([])
 	})
+
+	it("holds both limits when creates race on different machines", async () => {
+		const machine = (i: number) => MACHINE_1.replace(/1$/, i.toString(16))
+		// Five machines each list the whole quota at the same moment: one may have it.
+		let u = await newUser()
+		const base = await manifest(MACHINE_1, FILES)
+		const greedy = await Promise.all(Array.from({ length: 5 }, (_, i) => create(u.token, { ...base, machine: machine(i), objects: big(20) })))
+		expect(greedy.map(r => r.status).sort()).toEqual([201, 413, 413, 413, 413])
+		expect(greedy.find(r => r.status === 413)!.json.error).toMatchObject({ code: "quota_exceeded", used_bytes: 500_000_000, needed_bytes: 500_000_000 })
+		const listed = await env.DB.prepare("SELECT COALESCE(SUM(bytes), 0) AS n FROM upload_objects WHERE user_id = ?1").bind(u.id).first<{ n: number }>()
+		expect(listed!.n).toBe(500_000_000)
+
+		// Fourteen machines turn up at once: ten get in.
+		u = await newUser()
+		const crowd = await Promise.all(Array.from({ length: 14 }, async (_, i) => create(u.token, await manifest(machine(i), {}))))
+		expect(crowd.filter(r => r.status === 201)).toHaveLength(10)
+		const refused = crowd.filter(r => r.status !== 201)
+		expect(refused.map(r => [r.status, r.json.error.code])).toEqual(Array(4).fill([422, "too_many_machines"]))
+		expect(refused[0]!.json.error.machines).toHaveLength(10)
+	})
 })

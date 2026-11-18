@@ -111,7 +111,5 @@ below, and a route or custom domain.
   commit holds the old and the new snapshot of a machine until it lands, and the files of an
   upload that expired stay until the next sweep. That is a few times the quota at worst, and it
   does not grow.
-- **Two creates at once can pass the machine limit or the create-time quota check** by one
-  upload. The commit checks the quota again inside its transaction.
 - **Not checked against real Cloudflare.** The tests run on the local simulators. How real R2
   fails a wrong hash or a short body is tested only there.
