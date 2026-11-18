@@ -1,7 +1,7 @@
 [project]
 # "debrief" is taken on PyPI. The command and the import package are still `debrief`.
 name = "debrief-cli"
-version = "0.1.1"
+version = "0.2.0"
 description = "Review your coding-agent sessions: what went wrong, and what to change."
 readme = "README.md"
 requires-python = ">=3.13"
