@@ -83,8 +83,10 @@ def test_settings_save_and_read_back(api):
     status, got, _ = api("GET", "/api/settings")
     assert status == 200 and got["stages"]["label"]["llm"] == "claude-code" and got["github"] is True
     assert list(got["stages"]["recommend"]["defaults"]) == ["claude-code"]
+    config.save({"server": {"url": "https://debrief.example"}})
     status, got, _ = api("POST", "/api/settings", GOOD)
     assert status == 200 and got["stages"]["label"]["model"] == "typesafe/jev-1.13" and got["github"] is False
+    assert config.load()["server"] == {"url": "https://debrief.example"}  # the page does not set it and must not lose it
     assert config.choose("label") == ("openrouter", "typesafe/jev-1.13")
     assert not config.github_enabled()
 

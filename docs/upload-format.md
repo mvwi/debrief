@@ -1,7 +1,9 @@
 # Upload format, version 1
 
-What `debrief push` would send to a team server. No server exists yet: `debrief push --dry-run`
-writes the same files to a folder and sends nothing. `debrief/push.py` builds them.
+What `debrief push` sends to a team server. `debrief push --dry-run` writes the same files to a
+folder and sends nothing. `debrief/push.py` builds them; [server-api.md](server-api.md) is how
+they travel. debrief names no server of its own: a push goes to the address set in config.toml
+(`[server] url`) or in `DEBRIEF_SERVER`, and with neither set only the dry run works.
 
 The server stores and shows; it runs no models. Labels, findings and ideas are made on each
 person's machine before the upload.
@@ -46,7 +48,7 @@ The rule cannot see a log that someone copied into those two folders by hand.
      ],
      "unpicked": 4,
      "objects": {
-      "sessions/a1.json": {"sha256": "9f2c…", "bytes": 27415},
+      "sessions/a1.json": {"sha256": "9f2c…", "bytes": 27415, "project": "octo/alpha"},
       "findings.json": {"sha256": "41aa…", "bytes": 18877}
      },
      "sent": ["sessions/a1.json"]
@@ -64,8 +66,11 @@ The rule cannot see a log that someone copied into those two folders by hand.
   `turns` are the person's own turns.
 - `unpicked`: how many other projects debrief found on the machine.
 - `objects`: every object that should exist for this machine once the push is done, sent or
-  not, with the SHA-256 and length of its bytes.
-- `sent`: the objects that travel with this manifest.
+  not, with the SHA-256 and length of its bytes. A `sessions/` entry also has `project`, a `key`
+  from `projects` and the same value as the `project` field inside that object: a server that
+  never opens an object can still tell which sessions belong to a project.
+- `sent`: the objects a dry run wrote beside this manifest. A server ignores it and works out
+  what it lacks itself.
 
 With no project picked, `projects` is `[]`, `objects` is `{}` and nothing else is sent.
 
@@ -172,25 +177,20 @@ The manifest is the whole truth for one (user, machine). The objects sent are on
 Step 4 is how removal works: unpick a project and the next push takes its sessions off the
 server. The dry run says how many sessions a push would remove.
 
-How the client learns what the server holds is left to the server's author. The manifest
-allows either:
+The client learns what the server holds by asking: it sends the manifest first, the server
+answers with the paths whose bytes it lacks, and the client sends those and commits
+([server-api.md](server-api.md), "Upload"). In a dry run, `--prev DIR` stands in: it takes the
+manifest of an earlier bundle as what the server holds.
 
-- the server returns its `{path: sha256}` for this (user, machine) before the upload, and the
-  client sends what differs; or
-- the client remembers the last manifest the server accepted, and the server rejects a push
-  whose manifest lists an object it neither holds nor was sent, naming the missing paths so
-  the client sends them.
+The server checks each received object against its `sha256` and `bytes`, and applies a push
+whole or not at all.
 
-Neither is built. In a dry run, `--prev DIR` stands in: it takes the manifest of an earlier
-bundle as what the server holds.
-
-A server should check each received object against its `sha256` and `bytes`, and apply a
-push whole or not at all.
-
-Before a user's first real push, the client must ask them once to confirm they have the right
-to share what they upload: transcripts hold their employer's or clients' code and other people's
-names. The dry run prints that as a notice. The confirmation is not built; whoever builds the
-upload builds it, and the server's sign-up is the other place to say it.
+Before a user's first real push, `debrief push` shows this notice and asks them to type yes:
+upload only what you have the right to share, since transcripts hold your employer's or clients'
+code and other people's names. The answer is kept in `DEBRIEF_HOME/share_confirmed`, so it is
+asked once per machine; `--yes` gives it from a script. From then on every request that creates
+an upload carries the header `X-Debrief-Rights-Confirmed: 1`. The dry run prints the notice and
+asks nothing.
 
 Hashes are over the bytes after redaction. A debrief release that changes the redaction
 patterns changes the bytes of every object the new patterns touch, so those objects are sent
@@ -234,7 +234,7 @@ carry them.
   can work the first two out from the session objects. Skill uses are not derivable and are
   left for a later version.
 - **A date window**: every session of a picked project is in. `sync --since` has no twin here.
-- **Compression, transport, login, endpoints**: the server's author decides.
+- **Compression, transport, login, endpoints**: these belong to [server-api.md](server-api.md).
 
 ## Size
 

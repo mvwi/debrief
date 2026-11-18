@@ -1,11 +1,16 @@
-"""Build what an upload to a team server would hold. There is no server yet, so only --dry-run works.
+"""Build an upload for a team server, and send it.
 
     debrief push --dry-run              write the bundle under DEBRIEF_HOME/push and say what is in it
     debrief push --dry-run --out DIR    write it to DIR
     debrief push --dry-run --prev DIR   send only what changed since the bundle in DIR
+    debrief push                        send the bundle to the server you signed in to with `debrief login`
+    debrief push --yes                  the same, from a script: do not ask about the right to share
+
+A push sends the bundle a dry run writes, and nothing else. The server's address is `[server] url`
+in config.toml, or DEBRIEF_SERVER; a dry run needs neither.
 
 Only picked projects (`[projects] include` in config.toml) contribute anything. The rest are a
-count. docs/upload-format.md describes the files.
+count. docs/upload-format.md describes the files, docs/server-api.md the server.
 """
 
 import argparse
@@ -15,10 +20,13 @@ import re
 import sys
 import uuid
 from collections import Counter
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 
-from debrief import config
+import httpx
+
+from debrief import account, config
 from debrief.db import connect, repo_projects, session_projects
 from debrief.export_site import (
     ci_section,
@@ -39,8 +47,10 @@ FORMAT = 1
 MACHINE_PATH = HOME / "machine_id"
 DEFAULT_OUT = HOME / "push"
 SAFE_NAME = re.compile(r"[A-Za-z0-9_-][\w.-]*", re.ASCII)  # a session id that can be a file name as it is
-NO_SERVER = (f"{NAME}: there is no server to push to yet. "
-             f"`{NAME} push --dry-run` builds what would be sent and sends nothing.")
+CONFIRMED_PATH = HOME / "share_confirmed"  # there once the user has said they may share what they push
+RIGHTS_HEADER = f"X-{NAME.title()}-Rights-Confirmed"
+NOTICE = ("Upload only what you have the right to share: transcripts hold your employer's or clients' code "
+          "and other people's names.")
 
 
 def machine_id() -> tuple[str, bool]:
@@ -119,6 +129,8 @@ def build(conn, picked: set[str], machine: str, have: dict[str, str] | None = No
         counts.update(n)
         body = json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         objects[path] = {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
+        if path.startswith("sessions/"):  # the server never opens an object, so the manifest says whose it is
+            objects[path]["project"] = clean["project"]
         if have.get(path) != objects[path]["sha256"]:
             send[path] = body
     count, turns = Counter(s["project"] for s in sessions), Counter()
@@ -181,6 +193,52 @@ def write(out: Path, manifest: dict, send: dict[str, bytes]) -> int:
     return sum(len(b) for b in files.values())
 
 
+def confirm(yes: bool) -> None:
+    """Before the first real push, have the user say once that they may share what it holds."""
+    if CONFIRMED_PATH.exists():
+        return
+    print(NOTICE)
+    if not yes:
+        try:
+            answer = input("Type yes to confirm you have that right for the projects above: ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() != "yes":
+            sys.exit(f"{NAME}: nothing was sent. Answer yes to push, or pass --yes in a script.")
+    CONFIRMED_PATH.write_text(datetime.now(UTC).isoformat(timespec="seconds") + "\n")
+
+
+def upload(http: httpx.Client, manifest: dict, objects: dict[str, bytes]) -> tuple[dict, int]:
+    """Create an upload, send the objects the server lacks, commit. Returns the server's answer to
+    the commit and how many objects were sent.
+
+    A lost answer, a server error or an upload the server no longer knows starts again at create,
+    as the contract says. The server keeps the files that arrived, so the next create asks for fewer.
+    """
+    as_json = {"Content-Type": "application/json"}
+    body, sent = json.dumps(manifest, ensure_ascii=False).encode(), 0
+    for left in (2, 1, 0):
+        try:
+            up = account.call(http, "POST", "/v1/uploads", content=body, headers={**as_json, RIGHTS_HEADER: "1"}).json()
+            base, missing = f"/v1/uploads/{up['upload_id']}", up["missing"]
+            for _ in range(2):  # a commit that finds objects missing names them: send those and commit again
+                for path in missing:
+                    account.call(http, "PUT", f"{base}/files/{path}", content=objects[path], headers=as_json)
+                    sent += 1
+                try:
+                    return account.call(http, "POST", f"{base}/commit").json(), sent
+                except account.Refused as e:
+                    if e.code != "incomplete":
+                        raise
+                    missing, last = e.error["missing"], e
+            raise last
+        except (httpx.TransportError, account.Refused) as e:
+            again = isinstance(e, httpx.TransportError) or e.status >= 500 or e.code in ("not_found", "incomplete")
+            if not (again and left):
+                raise
+            print(f"  {account.plain(e) or type(e).__name__}; starting the upload again", flush=True)
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog=f"{NAME} push", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -188,9 +246,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", metavar="DIR", type=Path, default=DEFAULT_OUT, help=f"Where to write it (default {DEFAULT_OUT})")
     p.add_argument("--prev", metavar="DIR", type=Path,
                    help="An earlier bundle, taken as what the server holds: only objects that changed since are written")
+    p.add_argument("--yes", action="store_true",
+                   help="Confirm that you have the right to share what you push, without being asked (asked once otherwise)")
     args = p.parse_args(argv)
     if not args.dry_run:
-        sys.exit(NO_SERVER)
+        if args.prev or args.out != DEFAULT_OUT:
+            p.error("--out and --prev go with --dry-run")
+        url = account.server()
+        creds = account.signed_in(url)
     have = None
     if args.prev:
         try:
@@ -199,17 +262,21 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(f"{NAME}: {args.prev} holds no bundle manifest ({e})")
     machine, made = machine_id()
     manifest, send, stats = build(connect(), set(config.projects()), machine, have)
-    size = write(args.out, manifest, send)
 
     others = manifest["unpicked"]
-    print(f"Dry run: nothing was sent. The bundle is in {args.out} ({len(send) + 1} files, {size:,} bytes).")
+    if args.dry_run:
+        size = write(args.out, manifest, send)
+        print(f"Dry run: nothing was sent. The bundle is in {args.out} ({len(send) + 1} files, {size:,} bytes).")
+    else:
+        print(f"About to push to {url} as {account.plain(creds.get('login'))}: {len(send)} objects, "
+              f"{sum(len(b) for b in send.values()):,} bytes, less whatever the server already holds.")
     print(f"  projects    {len(manifest['projects'])} picked")
     for r in manifest["projects"]:
         print(f"                {r['name']}  ({r['key']}; {r['sessions']} sessions, {r['turns']} turns)")
     print(f"              {others} other project{'' if others == 1 else 's'} on this machine "
           f"{'is' if others == 1 else 'are'} not picked and nothing about them is sent")
-    print(f"  sessions    {stats['sessions']}, of which {stats['sessions_sent']} sent"
-          f"{' (the rest have not changed)' if have is not None else ''}")
+    print(f"  sessions    {stats['sessions']}" + (f", of which {stats['sessions_sent']} sent" if args.dry_run else "")
+          + (" (the rest have not changed)" if have is not None else ""))
     print(f"  turns       {stats['turns']} of yours, {stats['messages']} messages in all")
     print(f"  redactions  {stats['secrets']} secrets and {stats['emails']} email addresses replaced, "
           f"{stats['home_paths']} home-folder paths shortened to ~")
@@ -228,9 +295,18 @@ def main(argv: list[str] | None = None) -> None:
               "they draw on projects you have not picked or on sessions that are not sent.")
     if made:
         print(f"  Made an id for this machine, a random number kept in {MACHINE_PATH}.")
-    print("Redaction is pattern-based: read the bundle before you trust it.")
-    print("Upload only what you have the right to share: transcripts hold your employer's or clients' code "
-          "and other people's names.")
+    if args.dry_run:
+        print("Redaction is pattern-based: read the bundle before you trust it.")
+        print(NOTICE)
+        return
+    confirm(args.yes)
+    with account.talking(url), account.client(url, creds["token"]) as http:
+        done, sent = upload(http, manifest, send)
+        print(f"Pushed: sent {sent} object{'' if sent == 1 else 's'}; the server now holds {done['objects']} "
+              f"({done['bytes']:,} bytes) for this machine and removed {done['removed']}.")
+        for r in done["projects"]:
+            print(f"  {account.plain(r['name'])}  ({account.plain(r['key'])}; {r['sessions']} sessions, {r['turns']} turns)")
+        print(f"  {done['usage']['bytes']:,} of {done['usage']['quota_bytes']:,} bytes used.")
 
 
 if __name__ == "__main__":
