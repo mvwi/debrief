@@ -96,7 +96,8 @@ below, and a route or custom domain.
   no permissions and GitHub ends it after 8 hours.
 - **Deleted rows stay in D1's point-in-time recovery** for 30 days on Workers Paid (7 on free).
   Those rows hold GitHub ids, logins, project names and keys, and file hashes. Transcripts are
-  only in R2, where a delete is a delete.
+  only in R2, where a delete is a delete. **The privacy policy must say this**: after a user
+  deletes a project or their account, that account data can be restored for up to 30 days.
 - **A deleted project comes back** on the next push if it is still picked on the machine. The
   server keeps no memory of deletions.
 - **Rate limits are rough.** Cloudflare counts them per location and syncs in the background, so
