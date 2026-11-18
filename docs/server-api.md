@@ -4,7 +4,7 @@ The contract between `debrief` (the CLI) and the hosted server. The server signs
 GitHub, takes the bundle that `docs/upload-format.md` describes, lists it and deletes it. It
 runs no models and, in this version, serves nothing back but the project list.
 
-Nothing here is built yet. The server code will live in `server/`.
+The server code is in `server/`. Nothing is deployed yet.
 
 ## Basics
 
@@ -155,6 +155,16 @@ comes within that hour.
 
 ### POST /v1/uploads
 
+Header, on a user's first upload:
+
+    X-Debrief-Rights-Confirmed: 1
+
+The CLI sends it once the user has confirmed they have the right to share what they upload
+(see "Later pushes" in `docs/upload-format.md`). The first time the server sees it, it stores the
+time on the user's account; from then on the header is not needed and changes nothing. A create
+from a user with no stored time and no header gets `403 confirmation_required`. Only the exact
+value `1` counts. Deleting the account forgets the confirmation.
+
 Body: the `manifest.json` of `docs/upload-format.md`, format 1, with one addition:
 
 - each entry of `objects` whose path starts with `sessions/` carries `"project"`, a `key` from
@@ -178,11 +188,12 @@ What the server checks, each failure a `422 invalid_manifest` whose `message` na
 - `redaction` and `unpicked` are integers, 0 or more.
 - `projects` is an array. Each has a `key` (1 to 200 characters of `[A-Za-z0-9_.:/-]`), unique
   in the manifest; a `name` (string, at most 200 characters); `sessions` and `turns` (integers,
-  0 or more); `analysed_at` (string or null).
+  0 or more); `analysed_at` (string of at most 40 characters, or null).
 - `objects` is an object. Each path is `findings.json`, `github.json`, or
   `sessions/<name>.json` with `<name>` matching `[A-Za-z0-9_-][A-Za-z0-9_.-]*`, at most 200
   characters in all. `sha256` is 64 lower-case hex digits. `bytes` is an integer from 1 to
   25,000,000. A `sessions/` entry has a `project` that is one of the `projects` keys.
+- `objects` is empty when `projects` is.
 
 A manifest with `"projects": []` and `"objects": {}` is valid. Committing it removes
 everything the server holds for that machine.
@@ -206,6 +217,7 @@ Errors, besides `422 invalid_manifest` and `422 unsupported_format`:
 
 | Status | `code` | Extra fields in `error` | Meaning |
 |---|---|---|---|
+| 403 | `confirmation_required` | | See the header above. Checked before the body is read. |
 | 413 | `manifest_too_large` | | The body is over 1,000,000 bytes. |
 | 413 | `quota_exceeded` | `quota_bytes`, `used_bytes`, `needed_bytes` | `used_bytes` is what the user's other machines hold; `needed_bytes` is the sum of `bytes` in this manifest. Their sum is over `quota_bytes`. |
 | 422 | `too_many_machines` | `machines` (the ids held) | This would be the user's 11th machine. Delete the projects of one to free it. |
@@ -353,5 +365,4 @@ Not in the first server; the paths are placeholders:
   user's JSON.
 - `DELETE /v1/machines/{machine}`: drop one machine's snapshot in one call.
 - `Content-Encoding: gzip` on the file route.
-- A record that the user confirmed their right to share, taken at sign-in or first push.
 - Teams.
