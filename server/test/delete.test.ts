@@ -61,10 +61,13 @@ describe("deleting a project", () => {
 		const u = await newUser()
 		await push(u.token, MACHINE_1, { "sessions/a1.json": FILES["sessions/a1.json"]!, "findings.json": FILES["findings.json"]! })
 		const open = await call("POST", "/v1/uploads", { token: u.token, body: await manifest(MACHINE_1, FILES) })
+		await put(u.token, open.json.upload_id, "sessions/b1.json", FILES["sessions/b1.json"]![0])
+		expect(await storedKeys(`u/${u.id}/`)).toHaveLength(3)
 		expect((await call("DELETE", `/v1/projects/${await projectId(u.token, "octo/alpha")}`, { token: u.token })).status).toBe(204)
 
 		const { tokens: _tokens, users: _users, ...rest } = await rowCounts(u.id)
 		expect(rest).toEqual({ uploads: 0, upload_objects: 0, snapshots: 0, projects: 0, objects: 0 })
+		// Nothing is left, not even the file that had arrived for the cancelled upload.
 		expect(await storedKeys(`u/${u.id}/`)).toEqual([])
 		expect((await call("POST", `/v1/uploads/${open.json.upload_id}/commit`, { token: u.token })).status).toBe(404)
 	})

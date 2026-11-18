@@ -13,7 +13,7 @@ const ID = "([A-Za-z0-9_-]{1,200})"
 /** Every route that needs a token. The two sign-in routes are handled before these. */
 const ROUTES: Route[] = [
 	["DELETE", /^\/v1\/auth\/token$/, c => logout(c.udb, c.tokenHash)],
-	["POST", /^\/v1\/uploads$/, c => createUpload(c.udb, c.request)],
+	["POST", /^\/v1\/uploads$/, c => createUpload(c.env, c.udb, c.request)],
 	["PUT", new RegExp(`^/v1/uploads/${ID}/files/(.+)$`), c => putFile(c.env, c.udb, c.request, c.args[0]!, c.args[1]!)],
 	["POST", new RegExp(`^/v1/uploads/${ID}/commit$`), c => commitUpload(c.env, c.udb, c.args[0]!)],
 	["GET", /^\/v1\/projects$/, c => getProjects(c.udb)],

@@ -32,7 +32,10 @@ export async function deleteProject(env: Env, udb: UserDb, id: string): Promise<
 	if (!p) throw new HttpError(404, "not_found", "No such project.")
 	// The machine's findings.json and github.json may quote this project and cannot be cut, so they go too.
 	const mine = `user_id = ?1 AND machine = ?2 AND (project = ?3 OR path IN ${SHARED})`
-	const { results } = await udb.q(`SELECT DISTINCT sha256 FROM objects WHERE ${mine}`, p.machine, p.key).all<{ sha256: string }>()
+	// Files to look at afterwards: the project's own, and those of the open uploads this cancels.
+	const { results } = await udb.q(
+		`SELECT sha256 FROM objects WHERE ${mine} UNION SELECT sha256 FROM upload_objects WHERE user_id = ?1 AND received = 1`, p.machine, p.key,
+	).all<{ sha256: string }>()
 	await udb.batch([
 		// An open upload may count on a file this is about to delete.
 		udb.q("DELETE FROM upload_objects WHERE user_id = ?1"),

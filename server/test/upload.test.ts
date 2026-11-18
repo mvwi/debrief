@@ -366,4 +366,92 @@ describe("quota", () => {
 		expect([r.status, r.json.error.code]).toEqual([413, "quota_exceeded"])
 		expect((await snapshotRows(u.id)).filter(row => row.machine === MACHINE_1)).toEqual([])
 	})
+
+	it("counts the open uploads of the user's other machines, at create and at commit", async () => {
+		const u = await newUser()
+		const base = await manifest(MACHINE_1, FILES)
+		// 500 MB listed on one machine, not one byte sent yet.
+		expect((await create(u.token, { ...base, objects: big(20) })).status).toBe(201)
+		const other = await manifest(MACHINE_2, { "sessions/a.json": ["{}", "octo/alpha"] })
+		const r = await create(u.token, other)
+		expect([r.status, r.json.error]).toMatchObject([413, { code: "quota_exceeded", used_bytes: 500_000_000, needed_bytes: 2 }])
+		// Restarting the first machine's own upload is not held against it.
+		expect((await create(u.token, { ...base, objects: big(20) })).status).toBe(201)
+		// Once that upload is gone the other machine fits again.
+		await env.DB.prepare("UPDATE uploads SET expires_at = '2000-01-01T00:00:00Z' WHERE user_id = ?1").bind(u.id).run()
+		const small = await create(u.token, other)
+		expect(small.status).toBe(201)
+		await put(u.token, small.json.upload_id, "sessions/a.json", "{}")
+
+		// At commit: another machine opened a 500 MB upload after this one was created.
+		await env.DB.prepare("INSERT INTO uploads VALUES ('up_big', ?1, ?2, 't', 1, 0, '[]', '2999-01-01T00:00:00Z')").bind(u.id, MACHINE_1).run()
+		await env.DB.prepare("INSERT INTO upload_objects VALUES ('up_big', ?1, 'findings.json', ?2, 500000000, NULL, 0)").bind(u.id, "e".repeat(64)).run()
+		const commit = await call("POST", `/v1/uploads/${small.json.upload_id}/commit`, { token: u.token })
+		expect([commit.status, commit.json.error]).toMatchObject([413, { code: "quota_exceeded", used_bytes: 500_000_000 }])
+		expect(await snapshotRows(u.id)).toEqual([])
+	})
+
+	it("counts machines with an open upload toward the limit of ten", async () => {
+		const u = await newUser()
+		const machine = (i: number) => MACHINE_1.replace(/1$/, i.toString(16))
+		for (let i = 0; i < 10; i++) expect((await create(u.token, await manifest(machine(i), {}))).status).toBe(201)
+		const r = await create(u.token, await manifest(machine(10), {}))
+		expect([r.status, r.json.error.code]).toEqual([422, "too_many_machines"])
+		expect(r.json.error.machines).toHaveLength(10)
+	})
+
+	it("deletes at once the files of a restarted upload that the new manifest does not list", async () => {
+		const u = await newUser()
+		const first: Files = { "sessions/a.json": ['{"id":"a"}', "octo/alpha"], "sessions/b.json": ['{"id":"b"}', "octo/alpha"] }
+		const created = await create(u.token, await manifest(MACHINE_1, first))
+		for (const path of Object.keys(first)) await put(u.token, created.json.upload_id, path, first[path]![0])
+		expect(await storedKeys(`u/${u.id}/`)).toHaveLength(2)
+		// Restart with other content: without the cleanup this loop would store files without end.
+		const second = await create(u.token, await manifest(MACHINE_1, { "sessions/a.json": first["sessions/a.json"]!, "sessions/c.json": ['{"id":"c"}', "octo/alpha"] }))
+		expect(second.json.missing).toEqual(["sessions/c.json"])
+		expect(await storedKeys(`u/${u.id}/`)).toEqual([fileKey(u.id, await sha256(first["sessions/a.json"]![0]))])
+	})
+
+	it("refuses a manifest that understates the size of a file the server holds", async () => {
+		const u = await newUser()
+		const body = '{"id":"big","pad":"' + "x".repeat(1000) + '"}'
+		await push(u.token, MACHINE_1, { "sessions/big.json": [body, "octo/alpha"] })
+		const honest = await manifest(MACHINE_2, { "sessions/big.json": [body, "octo/alpha"] })
+		const lying = (bytes: number) => ({ ...honest, objects: { "sessions/big.json": { ...(honest.objects["sessions/big.json"] as object), bytes } } })
+
+		// Held in a snapshot.
+		for (const bytes of [1, body.length - 1, body.length + 1]) {
+			const r = await create(u.token, lying(bytes))
+			expect([bytes, r.status, r.json.error.code]).toEqual([bytes, 422, "invalid_manifest"])
+			expect(r.json.error.message).toContain("sessions/big.json")
+		}
+		// Held only by an open upload on another machine.
+		const other = '{"id":"other","pad":"' + "y".repeat(1000) + '"}'
+		const open = await create(u.token, await manifest(MACHINE_1, { "sessions/big.json": [body, "octo/alpha"], "sessions/other.json": [other, "octo/alpha"] }))
+		await put(u.token, open.json.upload_id, "sessions/other.json", other)
+		const viaUpload = await manifest(MACHINE_2, { "sessions/other.json": [other, "octo/alpha"] })
+		const r = await create(u.token, { ...viaUpload, objects: { "sessions/other.json": { ...(viaUpload.objects["sessions/other.json"] as object), bytes: 1 } } })
+		expect([r.status, r.json.error.code]).toEqual([422, "invalid_manifest"])
+
+		// The honest manifest is taken, and counted at the true size.
+		const ok = await create(u.token, honest)
+		expect([ok.status, ok.json.missing]).toEqual([201, []])
+		const done = await call("POST", `/v1/uploads/${ok.json.upload_id}/commit`, { token: u.token })
+		expect(done.json.usage.bytes).toBe(2 * body.length)
+	})
+
+	it("does not let one path's file stand in for a path that lists another size", async () => {
+		const u = await newUser()
+		const body = '{"id":"twin"}'
+		const m = await manifest(MACHINE_1, { "sessions/x.json": [body, "octo/alpha"], "sessions/y.json": [body, "octo/alpha"] })
+		m.objects["sessions/y.json"] = { ...(m.objects["sessions/y.json"] as object), bytes: 1 }
+		const created = await create(u.token, m)
+		expect((await put(u.token, created.json.upload_id, "sessions/x.json", body)).status).toBe(204)
+		const commit = await call("POST", `/v1/uploads/${created.json.upload_id}/commit`, { token: u.token })
+		expect([commit.status, commit.json.error]).toMatchObject([409, { code: "incomplete", missing: ["sessions/y.json"] }])
+		// The understated path cannot be completed either: one byte does not hash to that sha256.
+		const short = await put(u.token, created.json.upload_id, "sessions/y.json", "{")
+		expect([short.status, short.json.error.code]).toEqual([422, "hash_mismatch"])
+		expect(await snapshotRows(u.id)).toEqual([])
+	})
 })

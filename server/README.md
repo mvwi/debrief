@@ -105,7 +105,12 @@ below, and a route or custom domain.
   pushes the same bytes in the milliseconds between the two keeps a row whose file is gone. The
   fix is a per-user lock; see `collect` in `src/storage.ts`.
 - **The sweep lists the whole bucket** every hour. Fine for thousands of users, not for millions.
-- **A machine-count check can be passed by two commits at once**, by one machine. The byte quota
-  is checked inside the commit's transaction and cannot.
+- **The quota bounds storage loosely, not exactly.** Counted bytes can never pass 500 MB, and
+  every counted size is one the server checked. Real storage can run higher for a while: a
+  commit holds the old and the new snapshot of a machine until it lands, and the files of an
+  upload that expired stay until the next sweep. That is a few times the quota at worst, and it
+  does not grow.
+- **Two creates at once can pass the machine limit or the create-time quota check** by one
+  upload. The commit checks the quota again inside its transaction.
 - **Not checked against real Cloudflare.** The tests run on the local simulators. How real R2
   fails a wrong hash or a short body is tested only there.

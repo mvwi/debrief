@@ -68,18 +68,26 @@ async function validate(userId: string, m: unknown): Promise<Manifest> {
 }
 
 const overQuota = (used: number, needed: number) =>
-	new HttpError(413, "quota_exceeded", `This push needs ${needed} bytes beside the ${used} your other machines hold; your quota is ${QUOTA_BYTES}.`, {
+	new HttpError(413, "quota_exceeded", `This push needs ${needed} bytes beside the ${used} your other machines hold or are sending; your quota is ${QUOTA_BYTES}.`, {
 		quota_bytes: QUOTA_BYTES, used_bytes: used, needed_bytes: needed,
 	})
 
-/** Bytes the user's other machines hold. */
-async function usedElsewhere(udb: UserDb, machine: string): Promise<number> {
-	const row = await udb.q("SELECT COALESCE(SUM(bytes), 0) AS n FROM objects WHERE user_id = ?1 AND machine != ?2", machine).first<{ n: number }>()
-	return row!.n
+/**
+ * SQL for the bytes the user's other machines hold in snapshots, plus the bytes their open
+ * uploads list. An open upload counts in full from the moment it is created: a file can only be
+ * stored for a path of an open upload, at the size listed, so this sum bounds what PUT can store.
+ */
+const usedElsewhereSql = (machine: string, now: string) =>
+	`((SELECT COALESCE(SUM(bytes), 0) FROM objects WHERE user_id = ?1 AND machine != ${machine}) + ` +
+	`(SELECT COALESCE(SUM(x.bytes), 0) FROM upload_objects x JOIN uploads up ON up.id = x.upload_id ` +
+	`WHERE x.user_id = ?1 AND up.machine != ${machine} AND up.expires_at > ${now}))`
+
+async function usedElsewhere(udb: UserDb, machine: string, now: string): Promise<number> {
+	return (await udb.q(`SELECT ${usedElsewhereSql("?2", "?3")} AS n`, machine, now).first<{ n: number }>())!.n
 }
 
 /** POST /v1/uploads */
-export async function createUpload(udb: UserDb, request: Request): Promise<Response> {
+export async function createUpload(env: Env, udb: UserDb, request: Request): Promise<Response> {
 	const confirms = request.headers.get("X-Debrief-Rights-Confirmed") === "1"
 	const user = await udb.q("SELECT rights_confirmed_at FROM users WHERE id = ?1").first<{ rights_confirmed_at: string | null }>()
 	if (!user?.rights_confirmed_at && !confirms) {
@@ -89,37 +97,58 @@ export async function createUpload(udb: UserDb, request: Request): Promise<Respo
 	if (body === null) throw new HttpError(413, "manifest_too_large", `The manifest is over ${MAX_MANIFEST_BYTES} bytes.`)
 	const m = await validate(udb.userId, body)
 
-	const { results: held } = await udb.q("SELECT machine FROM snapshots WHERE user_id = ?1 ORDER BY machine").all<{ machine: string }>()
-	const machines = held.map(r => r.machine)
+	const now = Date.now(), id = `up_${random(16)}`, expiresAt = iso(now + UPLOAD_LIFE_MS)
+	// A machine counts once it has a snapshot or an open upload.
+	const { results: known } = await udb.q(
+		"SELECT machine FROM snapshots WHERE user_id = ?1 UNION SELECT machine FROM uploads WHERE user_id = ?1 AND expires_at > ?2 ORDER BY machine", iso(now),
+	).all<{ machine: string }>()
+	const machines = known.map(r => r.machine)
 	if (machines.length >= MAX_MACHINES && !machines.includes(m.machine)) {
 		throw new HttpError(422, "too_many_machines", `You already push from ${MAX_MACHINES} machines. Delete the projects of one to free it.`, { machines })
 	}
-	const used = await usedElsewhere(udb, m.machine)
+	const objectsJson = JSON.stringify(m.objects)
+	// The quota is summed from these sizes, so a size must be one the server has checked: when
+	// it already holds the bytes of a hash, the manifest has to state their true length.
+	const lie = await udb.q(
+		"SELECT j.key AS path FROM json_each(?2) j WHERE " +
+		"EXISTS (SELECT 1 FROM objects o WHERE o.user_id = ?1 AND o.sha256 = j.value->>'sha256' AND o.bytes != j.value->>'bytes') OR " +
+		"EXISTS (SELECT 1 FROM upload_objects x JOIN uploads up ON up.id = x.upload_id " +
+		"WHERE x.user_id = ?1 AND x.sha256 = j.value->>'sha256' AND x.received = 1 AND x.bytes != j.value->>'bytes' AND up.expires_at > ?3) LIMIT 1",
+		objectsJson, iso(now),
+	).first<{ path: string }>()
+	if (lie) throw new HttpError(422, "invalid_manifest", `manifest: objects[${lie.path}].bytes is not the size of the bytes with that sha256`)
+
+	const used = await usedElsewhere(udb, m.machine, iso(now))
 	const needed = Object.values(m.objects).reduce((sum, o) => sum + o.bytes, 0)
 	if (used + needed > QUOTA_BYTES) throw overQuota(used, needed)
 
-	const now = Date.now(), id = `up_${random(16)}`, expiresAt = iso(now + UPLOAD_LIFE_MS)
+	// Files that arrived for the upload this one replaces. Those the new manifest does not list
+	// are deleted below instead of waiting for the sweep, so restarting uploads stores nothing extra.
+	const { results: replaced } = await udb.q(
+		"SELECT DISTINCT x.sha256 FROM upload_objects x JOIN uploads up ON up.id = x.upload_id WHERE x.user_id = ?1 AND up.machine = ?2 AND x.received = 1", m.machine,
+	).all<{ sha256: string }>()
 	await udb.batch([
 		udb.q("UPDATE users SET rights_confirmed_at = ?2 WHERE id = ?1 AND rights_confirmed_at IS NULL AND ?3", iso(now), confirms ? 1 : 0),
 		udb.q(
 			"INSERT INTO uploads (id, user_id, machine, tool, redaction, unpicked, projects, expires_at) VALUES (?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8)",
 			id, m.machine, m.tool, m.redaction, m.unpicked, JSON.stringify(m.projects), expiresAt,
 		),
-		// A file is held when a snapshot of this user lists its hash, or it arrived for an upload
-		// that is still open. That includes the upload the next two statements cancel, so a retry
-		// does not send a file twice.
+		// A file is held when a snapshot of this user lists its hash at this size, or it arrived
+		// at this size for an upload that is still open. That includes the upload the next two
+		// statements cancel, so a retry does not send a file twice.
 		udb.q(
 			"INSERT INTO upload_objects (upload_id, user_id, path, sha256, bytes, project, received) " +
 			"SELECT ?2, ?1, j.key, j.value->>'sha256', j.value->>'bytes', j.value->>'project', " +
-			"EXISTS (SELECT 1 FROM objects o WHERE o.user_id = ?1 AND o.sha256 = j.value->>'sha256') OR " +
+			"EXISTS (SELECT 1 FROM objects o WHERE o.user_id = ?1 AND o.sha256 = j.value->>'sha256' AND o.bytes = j.value->>'bytes') OR " +
 			"EXISTS (SELECT 1 FROM upload_objects x JOIN uploads up ON up.id = x.upload_id " +
-			"WHERE x.user_id = ?1 AND x.sha256 = j.value->>'sha256' AND x.received = 1 AND up.expires_at > ?4) " +
+			"WHERE x.user_id = ?1 AND x.sha256 = j.value->>'sha256' AND x.bytes = j.value->>'bytes' AND x.received = 1 AND up.expires_at > ?4) " +
 			"FROM json_each(?3) j",
-			id, JSON.stringify(m.objects), iso(now),
+			id, objectsJson, iso(now),
 		),
 		udb.q("DELETE FROM upload_objects WHERE user_id = ?1 AND upload_id IN (SELECT id FROM uploads WHERE user_id = ?1 AND machine = ?2 AND id != ?3)", m.machine, id),
 		udb.q("DELETE FROM uploads WHERE user_id = ?1 AND machine = ?2 AND id != ?3", m.machine, id),
 	])
+	await collect(env, udb, replaced.map(r => r.sha256)).catch(e => console.error("collect after create failed", String(e)))
 	return json({ upload_id: id, missing: await missing(udb, id), expires_at: expiresAt }, 201)
 }
 
@@ -172,7 +201,8 @@ export async function putFile(env: Env, udb: UserDb, request: Request, uploadId:
 		if (hex(await digest.digest) !== row.sha256) throw new HttpError(422, "hash_mismatch", `The bytes of ${path} do not match the manifest's sha256.`)
 		throw e
 	}
-	await udb.q("UPDATE upload_objects SET received = 1 WHERE user_id = ?1 AND sha256 = ?2", row.sha256).run()
+	// Only rows that list the size just checked: a row with another size has to fail its own PUT.
+	await udb.q("UPDATE upload_objects SET received = 1 WHERE user_id = ?1 AND sha256 = ?2 AND bytes = ?3", row.sha256, row.bytes).run()
 	return noContent()
 }
 
@@ -187,7 +217,7 @@ export async function commitUpload(env: Env, udb: UserDb, uploadId: string): Pro
 		if (!up) throw noUpload()
 		const lacks = await missing(udb, uploadId)
 		if (lacks.length) throw new HttpError(409, "incomplete", `${lacks.length} listed objects have not arrived.`, { missing: lacks })
-		const used = await usedElsewhere(udb, up.machine)
+		const used = await usedElsewhere(udb, up.machine, now)
 		const needed = (await udb.q("SELECT COALESCE(SUM(bytes), 0) AS n FROM upload_objects WHERE user_id = ?1 AND upload_id = ?2", uploadId).first<{ n: number }>())!.n
 		if (used + needed > QUOTA_BYTES) throw overQuota(used, needed)
 		return up
@@ -209,7 +239,7 @@ export async function commitUpload(env: Env, udb: UserDb, uploadId: string): Pro
 				"INSERT INTO guard (ok) SELECT 0 WHERE NOT (" +
 				"EXISTS (SELECT 1 FROM uploads WHERE user_id = ?1 AND id = ?2 AND expires_at > ?3) " +
 				"AND NOT EXISTS (SELECT 1 FROM upload_objects WHERE user_id = ?1 AND upload_id = ?2 AND received = 0) " +
-				"AND (SELECT COALESCE(SUM(bytes), 0) FROM objects WHERE user_id = ?1 AND machine != ?4) " +
+				`AND ${usedElsewhereSql("?4", "?3")} ` +
 				"+ (SELECT COALESCE(SUM(bytes), 0) FROM upload_objects WHERE user_id = ?1 AND upload_id = ?2) <= ?5)",
 				uploadId, now, m, QUOTA_BYTES,
 			),
