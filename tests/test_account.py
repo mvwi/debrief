@@ -60,6 +60,9 @@ class Server:
                 return refuse(403, "confirmation_required")
             self.confirmed = True
             manifest = json.loads(request.content)
+            if manifest["objects"] and not manifest["projects"]:
+                return refuse(422, "invalid_manifest")
+            assert all(len(p["analysed_at"] or "") <= 40 for p in manifest["projects"])
             self.made_uploads += 1
             up = f"up_{self.made_uploads}"
             self.uploads = {up: manifest}  # a new upload cancels the one before
@@ -288,6 +291,25 @@ def test_first_push_asks_once_for_the_right_to_share(signed_in, monkeypatch, cap
     push.main([])
     assert "right to share" not in capsys.readouterr().out
     assert all(r.headers[RIGHTS] == "1" for what, r in signed_in.calls if what == "POST /v1/uploads")
+
+
+def test_a_server_that_forgot_the_confirmation_is_told_again_without_asking(signed_in, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("asked twice"))
+    push.main(["--yes"])
+    signed_in.confirmed = False  # the account was deleted and made again: the server asks for the header once more
+    push.main([])
+    assert len(signed_in.made("POST /v1/uploads/up_2/commit")) == 1
+
+
+def test_push_with_nothing_picked_sends_no_projects_and_no_objects(signed_in):
+    push.main(["--yes"])
+    assert signed_in.snapshot["objects"]
+    # A picked folder no session ran in is no project either; the findings and PR rows go with the sessions.
+    for picked in ([], ["/home/me/empty"]):
+        config.save({"server": {"url": URL}, "projects": {"include": picked}})
+        push.main([])
+        assert (signed_in.snapshot["projects"], signed_in.snapshot["objects"]) == ([], {})
+    assert len(signed_in.made("PUT")) == 5 and len(signed_in.made("POST /v1/uploads/")) == 3  # commits
 
 
 def test_push_with_no_one_to_ask_sends_nothing_unless_told_yes(signed_in, monkeypatch):
