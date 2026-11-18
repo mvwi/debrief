@@ -4,7 +4,7 @@ The contract between `debrief` (the CLI) and the hosted server. The server signs
 GitHub, takes the bundle that `docs/upload-format.md` describes, lists it and deletes it. It
 runs no models and, in this version, serves nothing back but the project list.
 
-Nothing here is built yet. The server code will live in `server/`.
+The server code is in `server/`. Nothing is deployed yet.
 
 ## Basics
 
@@ -72,7 +72,10 @@ A thing that belongs to another user is `404 not_found`, the same as a thing tha
 | All other routes | 600 a minute per user (per IP address for `POST /v1/auth/token`) | `429 rate_limited` |
 
 Stored bytes are the sum of `bytes` over the objects in the user's committed manifests. The same
-object held by two machines counts twice.
+object held by two machines counts twice. An open upload counts too, in full, from the moment it
+is created until it is committed, cancelled or expired: see `quota_exceeded` under
+`POST /v1/uploads`. A machine counts toward the limit of 10 once it has a snapshot or an open
+upload.
 
 A client may send up to 4 file uploads at once.
 
@@ -149,11 +152,21 @@ A push replaces the whole snapshot of one (user, machine), where `machine` is th
 `machine`. It takes three steps: create, send the missing files, commit. Nothing changes on the
 server until the commit, and the commit applies whole or not at all.
 
-A retry after any failure is always the same: start again at create. Files that arrived are
-kept for the life of the upload they were sent to, so the new create lists them as held when it
-comes within that hour.
+A retry after any failure is always the same: start again at create with the same manifest.
+Files that arrived are kept for the life of the upload they were sent to, so the new create
+lists them as held when it comes within that hour.
 
 ### POST /v1/uploads
+
+Header, on a user's first upload:
+
+    X-Debrief-Rights-Confirmed: 1
+
+The CLI sends it once the user has confirmed they have the right to share what they upload
+(see "Later pushes" in `docs/upload-format.md`). The first time the server sees it, it stores the
+time on the user's account; from then on the header is not needed and changes nothing. A create
+from a user with no stored time and no header gets `403 confirmation_required`. Only the exact
+value `1` counts. Deleting the account forgets the confirmation.
 
 Body: the `manifest.json` of `docs/upload-format.md`, format 1, with one addition:
 
@@ -178,11 +191,14 @@ What the server checks, each failure a `422 invalid_manifest` whose `message` na
 - `redaction` and `unpicked` are integers, 0 or more.
 - `projects` is an array. Each has a `key` (1 to 200 characters of `[A-Za-z0-9_.:/-]`), unique
   in the manifest; a `name` (string, at most 200 characters); `sessions` and `turns` (integers,
-  0 or more); `analysed_at` (string or null).
+  0 or more); `analysed_at` (string of at most 40 characters, or null).
 - `objects` is an object. Each path is `findings.json`, `github.json`, or
   `sessions/<name>.json` with `<name>` matching `[A-Za-z0-9_-][A-Za-z0-9_.-]*`, at most 200
   characters in all. `sha256` is 64 lower-case hex digits. `bytes` is an integer from 1 to
   25,000,000. A `sessions/` entry has a `project` that is one of the `projects` keys.
+- `objects` is empty when `projects` is.
+- When the server already holds the bytes of a `sha256` for this user, `bytes` is their true
+  length. The quota is summed from `bytes`, so the server takes only sizes it has checked.
 
 A manifest with `"projects": []` and `"objects": {}` is valid. Committing it removes
 everything the server holds for that machine.
@@ -200,15 +216,18 @@ holds an object when a file with that SHA-256 is in any of the user's committed 
 arrived in an upload that has not expired. Send exactly the paths in `missing`. It can be empty;
 commit all the same.
 
-Creating an upload cancels an earlier open upload of the same (user, machine).
+Creating an upload cancels an earlier open upload of the same (user, machine). Files that
+arrived for the cancelled upload are kept when the new manifest lists them and deleted when it
+does not.
 
 Errors, besides `422 invalid_manifest` and `422 unsupported_format`:
 
 | Status | `code` | Extra fields in `error` | Meaning |
 |---|---|---|---|
+| 403 | `confirmation_required` | | See the header above. Checked before the body is read. |
 | 413 | `manifest_too_large` | | The body is over 1,000,000 bytes. |
-| 413 | `quota_exceeded` | `quota_bytes`, `used_bytes`, `needed_bytes` | `used_bytes` is what the user's other machines hold; `needed_bytes` is the sum of `bytes` in this manifest. Their sum is over `quota_bytes`. |
-| 422 | `too_many_machines` | `machines` (the ids held) | This would be the user's 11th machine. Delete the projects of one to free it. |
+| 413 | `quota_exceeded` | `quota_bytes`, `used_bytes`, `needed_bytes` | `used_bytes` is what the user's other machines hold in snapshots plus everything their open uploads list; `needed_bytes` is the sum of `bytes` in this manifest. Their sum is over `quota_bytes`. An open upload of another machine frees its share when it is committed or expires. |
+| 422 | `too_many_machines` | `machines` (the ids counted) | This would be the user's 11th machine. Delete the projects of one to free it; a machine that has only an open upload frees itself when the upload expires. |
 
 ### PUT /v1/uploads/{upload_id}/files/{path}
 
@@ -264,7 +283,7 @@ Errors:
 |---|---|---|---|
 | 404 | `not_found` | | As for the file route. If a commit's answer was lost, start again at create: when the commit had landed, `missing` comes back empty and the second commit changes nothing. |
 | 409 | `incomplete` | `missing` (paths) | Some listed objects have not arrived. Send them and commit again. Nothing changed. |
-| 413 | `quota_exceeded` | as at create | Another machine's commit used the room since create. Nothing changed. |
+| 413 | `quota_exceeded` | as at create | Another machine's commit or new upload used the room since create. Nothing changed. |
 
 ## Projects
 
@@ -311,7 +330,7 @@ Deletes one project from the server:
 - the project itself. When it was the machine's last, the machine no longer counts toward the
   limit of 10.
 
-It also cancels the user's open uploads.
+It also cancels the user's open uploads and deletes the files that arrived for them.
 
 `204`, no body: the rows are gone and so are the stored files that no other snapshot of the user
 lists. `404 not_found` when the id is unknown. On `500` nothing is promised but that a retry is
@@ -353,5 +372,4 @@ Not in the first server; the paths are placeholders:
   user's JSON.
 - `DELETE /v1/machines/{machine}`: drop one machine's snapshot in one call.
 - `Content-Encoding: gzip` on the file route.
-- A record that the user confirmed their right to share, taken at sign-in or first push.
 - Teams.
