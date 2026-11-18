@@ -12,6 +12,9 @@ Set in DEBRIEF_HOME/config.toml, one table per stage:
 are labeled, turned into findings and ideas, and shown in the report. With none picked, sync
 stops after ingest. `debrief sync --project DIR` adds one; `debrief config --drop DIR` removes one.
 
+`[server] url = "https://..."` names the team server `debrief login` and `debrief push` talk to.
+DEBRIEF_SERVER beats it. There is no default: with neither set, nothing can be sent.
+
 A flag beats an environment variable, which beats config.toml, which beats DEFAULTS.
 
 The Settings page of `debrief open` writes config.toml, and keeps an OpenRouter key in
@@ -27,7 +30,7 @@ import tomllib
 
 from dotenv import dotenv_values, find_dotenv, load_dotenv, set_key, unset_key
 
-from debrief.paths import HOME, NAME
+from debrief.paths import HOME, NAME, SERVER_ENV
 
 CONFIG_PATH = HOME / "config.toml"
 ENV_PATH = HOME / ".env"
@@ -36,6 +39,10 @@ KEY = "OPENROUTER_API_KEY"
 # a backslash or a line break.
 MODEL_RE = re.compile(r"[\w./:@-]{1,100}", re.ASCII)
 KEY_RE = re.compile(r"[\w.-]{20,200}", re.ASCII)
+# HTTPS only, as the contract says; plain HTTP is for a server on this machine. No quotes, so it
+# can sit between plain quotes in config.toml.
+SERVER_RE = re.compile(r"(https://[\w.-]+|http://(localhost|127\.0\.0\.1))(:\d+)?(/[\w./-]*)?", re.ASCII)
+SERVER_RULE = "an https:// address (http:// only for localhost)"
 
 MAX_PROJECTS, MAX_PATH = 200, 500
 
@@ -59,6 +66,11 @@ def check(cfg: dict) -> None:
     """Raise ValueError unless cfg is what config.toml may hold."""
     for stage, table in cfg.items():
         if stage == "github" and isinstance(table, dict):
+            continue
+        if stage == "server" and isinstance(table, dict):
+            url = table.get("url")
+            if url is not None and not (isinstance(url, str) and SERVER_RE.fullmatch(url)):
+                raise ValueError(f"[server] url must be {SERVER_RULE}")
             continue
         if stage == "projects" and isinstance(table, dict):
             include = table.get("include", [])
@@ -101,6 +113,8 @@ def save(cfg: dict) -> None:
         # A JSON list of strings is a TOML one too: both escape a quote and a backslash the same
         # way, and check() has ruled out control characters.
         lines += ["[projects]", f"include = {json.dumps(include, ensure_ascii=False)}", ""]
+    if url := cfg.get("server", {}).get("url"):
+        lines += ["[server]", f'url = "{url}"', ""]
     HOME.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_PATH.with_suffix(".toml.tmp")
     tmp.write_text("\n".join(lines))
@@ -174,6 +188,14 @@ def projects() -> list[str]:
     return load().get("projects", {}).get("include", [])
 
 
+def server() -> str | None:
+    """The team server's address, without a closing slash. None when none is set."""
+    url = os.environ.get(SERVER_ENV) or load().get("server", {}).get("url")
+    if url and not SERVER_RE.fullmatch(url):  # the file's was checked by load(); this is the variable's
+        sys.exit(f"{NAME}: {SERVER_ENV} must be {SERVER_RULE}")
+    return url.rstrip("/") if url else None
+
+
 def pick(project: str) -> None:
     """Add a folder to the picked projects."""
     cfg = load()
@@ -201,4 +223,5 @@ def main(argv: list[str] | None = None) -> None:
     for stage in DEFAULTS:
         llm, model = choose(stage)
         print(f"  {stage:<11}{llm:<13}{model}")
+    print(f"  server     {server() or f'none set: `{NAME} push` can only do a dry run'}")
     print(f"  projects   {', '.join(projects()) or 'none picked: `debrief sync` lists them'}")

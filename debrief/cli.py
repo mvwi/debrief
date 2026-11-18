@@ -7,6 +7,9 @@
     debrief open                 serve the report on localhost and open it in the browser;
                                  the page can also start a sync, show its progress and stop it
     debrief push --dry-run       build what an upload to a team server would hold; sends nothing
+    debrief login                sign in to the team server with GitHub (`[server] url` in config.toml)
+    debrief push                 send that upload to the team server
+    debrief logout               sign out of the team server
     debrief <stage> [args]       run one stage; `debrief <stage> --help` lists its flags
 
 Everything is kept under DEBRIEF_HOME (default ~/.local/share/debrief).
@@ -186,7 +189,8 @@ class ReportHandler(http.server.SimpleHTTPRequestHandler):
                     if not isinstance(body.get("stages"), dict) or not isinstance(body.get("github"), bool):
                         raise TypeError("expected {stages: {...}, github: true or false}")
                     # The page that does not send the picked projects keeps them.
-                    config.save({**body["stages"], "github": {"enabled": body["github"]},
+                    # The page does not set the server address: keep the file's.
+                    config.save({**body["stages"], "server": config.load().get("server", {}), "github": {"enabled": body["github"]},
                                  "projects": {"include": body.get("projects", config.projects())}})
                 case "POST", "/api/key":
                     config.save_key(body.get("key"))
@@ -287,6 +291,8 @@ def main(argv: list[str] | None = None) -> None:
     name, rest = argv[0], argv[1:]
     if name in commands:
         commands[name](rest)
+    elif name in ("login", "logout"):
+        getattr(importlib.import_module(f"{__package__}.account"), name)(rest)
     elif name in STAGES:
         importlib.import_module(f"{__package__}.{STAGES[name]}").main(rest)
     else:

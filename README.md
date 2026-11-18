@@ -38,6 +38,8 @@ logged-in `claude` CLI. Without one, pick OpenRouter and save a key on the Setti
     debrief sync               # ingest, label, find patterns, build the report
     debrief open               # serve the report at http://127.0.0.1:8765 and open it
     debrief push --dry-run     # write what an upload to a team server would hold; sends nothing
+    debrief login              # sign in to your team's server with GitHub
+    debrief push               # send that upload to the server
 
 Useful flags for `sync`:
 
@@ -85,10 +87,12 @@ Unticking it on the Projects page does the same.
   SHAs, and nothing from your transcripts. `--no-github`, or `[github] enabled = false` in
   config.toml, turns it off; without `gh` it is skipped.
 - `debrief push --dry-run` writes a folder (`~/.local/share/debrief/push`, or `--out DIR`) that
-  holds transcript text from your picked projects, and sends nothing. No upload exists yet:
-  `debrief push` without `--dry-run` refuses. [docs/upload-format.md](docs/upload-format.md)
-  says what the folder holds. Upload only what you have the right to share: transcripts hold
-  your employer's or clients' code and other people's names.
+  holds transcript text from your picked projects, and sends nothing.
+  [docs/upload-format.md](docs/upload-format.md) says what the folder holds.
+- `debrief push` sends those same files, and nothing else, to the team server you set and signed
+  in to: see "Push to a team server". debrief has no server of its own and no default address,
+  so until you set one nothing can be uploaded. Upload only what you have the right to share:
+  transcripts hold your employer's or clients' code and other people's names.
 - The report holds your transcripts. `debrief open` serves it on 127.0.0.1 only.
 - Secrets are replaced with `[redacted]` in the report and in anything debrief uploads. The text
   sent to the model for labeling and synthesis is not redacted. Three things are caught: known
@@ -102,6 +106,34 @@ Unticking it on the Projects page does the same.
   IP addresses, host names or people's names; uploads replace email addresses and your home
   folder path, the report does not. Findings and ideas are text a model wrote, and nothing
   checks that text for the names of projects you did not pick. Read before you share.
+
+## Push to a team server
+
+A team server keeps each person's bundle so their sessions can be compared. debrief does not
+come with one. If your team runs one, put its address in `~/.local/share/debrief/config.toml`:
+
+    [server]
+    url = "https://debrief.your-team.example"
+
+or set `DEBRIEF_SERVER`, which beats the file. Then:
+
+    debrief login              # prints a code to enter at github.com, and waits
+    debrief push --dry-run     # read what would be sent
+    debrief push               # send it
+    debrief logout             # revoke the token and remove it from this machine
+
+- `login` signs you in with GitHub's device flow. debrief never sees a GitHub token. The server's
+  own token is kept in `~/.local/share/debrief/credentials`, readable only by you, and is sent
+  only to the server that issued it. It lasts 90 days.
+- `push` builds the bundle the way the dry run does and sends only the files the server lacks.
+  It replaces what the server holds for this machine, so a project you take out with
+  `debrief config --drop DIR` leaves the server at the next push.
+- The first push asks you to type yes to confirm you have the right to share what it holds.
+  `--yes` answers for a script. The answer is kept, so you are asked once.
+- A push that is cut off changes nothing on the server. Run it again: files that arrived are
+  not sent twice.
+
+[docs/server-api.md](docs/server-api.md) is the contract between the two.
 
 ## Which labeler
 

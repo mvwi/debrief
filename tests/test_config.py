@@ -63,8 +63,8 @@ def test_save_then_load_round_trips(cfg):
     assert config.load() == saved
     assert config.choose("label") == ("openrouter", "typesafe/jev-1.13")
     assert not config.github_enabled()
-    config.save({"github": {"enabled": True}})
-    assert config.load() == {"github": {"enabled": True}}
+    config.save({"github": {"enabled": True}, "server": {"url": "https://debrief.example"}})
+    assert config.load() == {"github": {"enabled": True}, "server": {"url": "https://debrief.example"}}
 
 
 @pytest.mark.parametrize("bad", [

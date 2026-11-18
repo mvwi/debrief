@@ -7,6 +7,7 @@ from pathlib import Path
 # file, token header. Changing it strands existing users' data: see tests/test_paths.py.
 NAME = "debrief"
 TOKEN_HEADER = f"X-{NAME.title()}-Token"
+SERVER_ENV = f"{NAME.upper()}_SERVER"  # the team server's address; beats `[server] url` in config.toml
 
 HOME = Path(os.environ.get(f"{NAME.upper()}_HOME") or Path.home() / ".local" / "share" / NAME)
 DB_PATH = Path(os.environ.get(f"{NAME.upper()}_DB") or HOME / f"{NAME}.db")
