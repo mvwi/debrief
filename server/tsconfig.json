@@ -1,0 +1,14 @@
+{
+	"compilerOptions": {
+		"target": "es2023",
+		"lib": ["es2023"],
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"types": ["./worker-configuration.d.ts", "@cloudflare/vitest-plugin/types", "vite/client"]
+	},
+	"include": ["src", "test", "vitest.config.ts"]
+}
